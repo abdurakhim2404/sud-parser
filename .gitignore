@@ -1,0 +1,15 @@
+# Персональные данные и результаты — не в репозиторий
+data/
+reports/
+logs/
+input/*
+!input/debtors_example.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Личные заметки
+SHPARGALKA.md
