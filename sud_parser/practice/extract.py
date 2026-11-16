@@ -39,7 +39,7 @@ MONTHS = {
     "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
 }
 CASE_NO_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-[0-9A-Za-zА-Яа-я]{1,3}/\d+)")
-DATE_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s*(?:года|г\.)", re.I)
+DATE_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s*(?:года?\b|г\.)", re.I)  # «2025 года», «2025год», «2025 г.»
 
 OSI_RE = re.compile(
     r"объединени\w*\s+собственник|\bОСИ\b|\bП?КСК\b|кооператив\w*\s+собственник|простое\s+товариществ",
@@ -128,7 +128,9 @@ class Decision:
     topic: str = ""
     outcome: str = UNKNOWN
     outcome_text: str = ""
-    amounts: Amounts = field(default_factory=Amounts)
+    amounts: Amounts = field(default_factory=Amounts)        # взыскано в пользу ОСИ
+    osi_pays: Amounts = field(default_factory=Amounts)       # взыскано с ОСИ
+    other_awards: Amounts = field(default_factory=Amounts)   # между другими участниками
     obligations: int = 0
     citations: list[Citation] = field(default_factory=list)
     resolutions: list[str] = field(default_factory=list)
@@ -300,17 +302,20 @@ ARTICLE_RE = re.compile(
     r"(\d+(?:\s*[-–]\s*\d+)?(?:\s*(?:,|\bи\b)\s*\d+(?:\s*[-–]\s*\d+)?)*)",
     re.I,
 )
-LAW_TITLE_RE = re.compile(
-    r"Закон\w*\s+(?:Республики\s+Казахстан\s+|РК\s+)?(?:от\s[^«]{0,40}?)?«([^»]{3,200})»", re.I
-)
+# «Закон РК «…»», «ЗРК «…»».
+LAW_HEAD = r"(?:Закон\w*|ЗРК)\s+(?:Республики\s+Казахстан\s+|РК\s+)?(?:от\s[^«]{0,40}?)?"
+LAW_TITLE_RE = re.compile(LAW_HEAD + r"«([^»]{3,200})»", re.I)
+# Сразу после номера статьи слово «Закон» иногда пропущено: «статьи 43 Республики Казахстан «…»».
+# Только здесь: в остальном тексте так же пишут названия постановлений Верховного суда.
+LAW_AFTER_ARTICLE_RE = re.compile(r"(?:" + LAW_HEAD + r"|Республики\s+Казахстан\s+)«([^»]{3,200})»", re.I)
 ALIAS_RE = re.compile(
-    r"Закон\w*\s+(?:Республики\s+Казахстан\s+|РК\s+)?(?:от\s[^«]{0,40}?)?«([^»]{3,200})»\s*"
+    LAW_HEAD + r"«([^»]{3,200})»\s*"
     r"(?:[^\s(]{1,3}\s*)?"  # опечатки вида «…отношениях» о (далее - Закон)
     r"\(\s*далее\s*[-–—]?\s*(?:по\s+тексту\s*[-–—]?\s*)?([^)]{1,30}?)\s*\)",
     re.I,
 )
 CODES = (
-    ("ГПК", re.compile(r"(?:ГПК\b|Гражданск\w*\s+процессуальн\w*\s+[Кк]одекс)")),
+    ("ГПК", re.compile(r"(?:ГПК\b|Гражданск\w*\s+процессуальн\w*\s+(?:[Кк]одекс|прав))")),  # «…права» — опечатка в решениях
     ("ГК", re.compile(r"(?:ГК\b|Гражданск\w*\s+[Кк]одекс)")),
     ("НК", re.compile(r"(?:НК\b|Налогов\w*\s+[Кк]одекс)")),
     ("ЗК", re.compile(r"(?:ЗК\b|Земельн\w*\s+[Кк]одекс)")),
@@ -323,7 +328,7 @@ RESOLUTION_RE = re.compile(
 
 
 def _law_title(title: str) -> str:
-    title = _norm(title)
+    title = _norm(title).split(". ")[0]  # «О жилищных отношениях. Решение принято» — кавычка не закрыта
     return f"Закон «{title[0].upper()}{title[1:]}»"
 
 
@@ -351,8 +356,8 @@ def _expand_articles(numbers: str) -> list[str]:
     return result
 
 
-CHAINED_RE = re.compile(
-    r"и\s+(?:(?:пункт|част|подпункт)\w*\s+[\d\-]+\s+)*стат\w*\s+[\d\s,\-–и]+?\s*(?=[А-ЯЁA-Z])"
+CHAINED_RE = re.compile(  # «статьи 2 и пункта 1 статьи 50 Закона», «статьи 48, части 3 статьи 169 ГПК»
+    r"(?:и\s+)?(?:(?:пункт|част|подпункт)\w*\s+[\d\-]+\s+)*стат\w*\s+[\d\s,\-–и]+?\s*(?=[А-ЯЁA-Z])"
 )
 
 
@@ -360,7 +365,7 @@ def _resolve_law(window: str, aliases: dict[str, str], bare_law: str | None) -> 
     for name, rx in CODES:
         if rx.match(window):
             return name
-    tm = LAW_TITLE_RE.match(window)
+    tm = LAW_AFTER_ARTICLE_RE.match(window)
     if tm:
         return _law_title(tm.group(1))
     for alias in sorted(aliases, key=len, reverse=True):
@@ -447,23 +452,88 @@ def _money_kind(context: str) -> str:
     return "principal"
 
 
-def extract_amounts(operative_lines: list[str]) -> Amounts:
-    """Суммы из строк «Взыскать ...» резолютивной части."""
-    amounts = Amounts()
+# «…, всего 20 600 тенге» — это сумма уже перечисленного, второй раз её не считаем.
+TOTAL_RE = re.compile(r"\b(?:всего|итого|в\s+общей\s+сумме|на\s+общую\s+сумму)\b", re.I)
+PAYER_PAYEE_RE = re.compile(r"\bвзыскать\b(?P<payer>.*?)\bв\s+пользу\b(?P<payee>.*)", re.I)
+# Где кончается название получателя и начинается «за что»: «… в пользу ОСИ «Х» задолженность …».
+PAYEE_END_RE = re.compile(
+    r"\s(?:сумм|задолж|расход|судебн|государствен|госпошлин|оплат|возврат|нотариал|почтов|неустойк|"
+    r"пен[яиюе]\b|услуг|представител|уплаченн|\d)", re.I)
+
+TO_OSI, FROM_OSI, OTHER = "в пользу ОСИ", "с ОСИ", "между другими участниками"
+
+
+def _award_lines(operative_lines: list[str]):
+    """Строки «Взыскать …» без сумм прописью в скобках."""
     for line in operative_lines:
         if not re.search(r"\bвзыскать\b", line, re.I):
             continue
         clean = line
-        while re.search(r"\([^()]*\)", clean):  # суммы прописью в скобках
+        while re.search(r"\([^()]*\)", clean):
             clean = re.sub(r"\([^()]*\)", " ", clean)
-        clean = _norm(clean)
-        for fragment in re.split(r";|,\s+(?=[^\d\s])", clean):
-            prev_end = 0
-            for m in MONEY_RE.finditer(fragment):
-                context = fragment[prev_end:m.start()]
-                amounts.add(_money_kind(context), _parse_money(m.group(1), m.group(2)))
-                prev_end = m.end()
+        yield _norm(clean)
+
+
+def _line_amounts(clean: str) -> Amounts:
+    amounts = Amounts()
+    for fragment in re.split(r";|,\s+(?=[^\d\s])", clean):
+        prev_end = 0
+        for m in MONEY_RE.finditer(fragment):
+            context = fragment[prev_end:m.start()]
+            prev_end = m.end()
+            if TOTAL_RE.search(context):
+                continue
+            amounts.add(_money_kind(context), _parse_money(m.group(1), m.group(2)))
     return amounts
+
+
+def _each_multiplier(clean: str) -> int:
+    """«… в пользу А, Б, В … по 3 692 тенге каждому» — сумма на каждого получателя."""
+    if not re.search(r"\bкаждо(?:му|го|й)\b", clean, re.I):
+        return 1
+    m = PAYER_PAYEE_RE.search(clean)
+    if not m:
+        return 1
+    payee = PAYEE_END_RE.split(m.group("payee"), maxsplit=1)[0]
+    return max(1, len(split_parties([re.sub(r"\s+и\s+", ", ", payee)])))
+
+
+def award_direction(clean: str, osi_plaintiff: bool) -> str:
+    """Кто кому платит по строке «Взыскать с X в пользу Y»."""
+    m = PAYER_PAYEE_RE.search(clean)
+    if m:
+        payer = m.group("payer")
+        payee = PAYEE_END_RE.split(m.group("payee"), maxsplit=1)[0]
+    else:  # «Взыскать с Иванова задолженность …» — получатель не назван
+        payer, payee = clean, ""
+    if OSI_RE.search(payee):
+        return TO_OSI
+    if OSI_RE.search(payer):
+        return FROM_OSI
+    if not payee and osi_plaintiff:
+        return TO_OSI  # получатель не назван — значит, истец, а истец здесь ОСИ
+    return OTHER
+
+
+def extract_amounts(operative_lines: list[str]) -> Amounts:
+    """Все суммы из строк «Взыскать ...» резолютивной части, без разделения по сторонам."""
+    total = Amounts()
+    for clean in _award_lines(operative_lines):
+        k = _each_multiplier(clean)
+        for kind, value in vars(_line_amounts(clean)).items():
+            total.add(kind, value * k)
+    return total
+
+
+def split_amounts(operative_lines: list[str], osi_plaintiff: bool) -> dict[str, Amounts]:
+    """Суммы по направлениям: в пользу ОСИ, с ОСИ, между другими участниками."""
+    out = {TO_OSI: Amounts(), FROM_OSI: Amounts(), OTHER: Amounts()}
+    for clean in _award_lines(operative_lines):
+        target = out[award_direction(clean, osi_plaintiff)]
+        k = _each_multiplier(clean)
+        for kind, value in vars(_line_amounts(clean)).items():
+            target.add(kind, value * k)
+    return out
 
 
 def classify_topic(claim: str) -> str:
@@ -593,7 +663,8 @@ def parse_decision(text: str, file: str = "") -> Decision:
     if operative:
         d.outcome = classify_outcome(operative_text)
         d.outcome_text = _norm(operative[0])
-        d.amounts = extract_amounts(operative)
+        split = split_amounts(operative, osi_plaintiff="истец" in d.osi_role)
+        d.amounts, d.osi_pays, d.other_awards = split[TO_OSI], split[FROM_OSI], split[OTHER]
         d.obligations = sum(1 for l in operative if re.match(r"(Обязать|Признать)\b", l))
 
     d.topic = classify_topic(d.claim or d.outcome_text)

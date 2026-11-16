@@ -183,6 +183,27 @@ def money_stats(decisions: list[Decision]) -> MoneyStats | None:
     )
 
 
+@dataclass
+class OsiPaysStats:
+    decisions: int
+    total: float
+    lawyer_total: float
+    state_fee_total: float
+
+
+def osi_pays_stats(decisions: list[Decision]) -> OsiPaysStats | None:
+    """Сколько суды взыскали с самого ОСИ (обычно судебные расходы выигравшей стороны)."""
+    paying = [d for d in decisions if d.osi_pays.total > 0]
+    if not paying:
+        return None
+    return OsiPaysStats(
+        decisions=len(paying),
+        total=round(sum(d.osi_pays.total for d in paying), 2),
+        lawyer_total=sum(d.osi_pays.lawyer for d in paying),
+        state_fee_total=sum(d.osi_pays.state_fee for d in paying),
+    )
+
+
 def court_key(d: Decision) -> str:
     """Суд по коду в номере дела (первые 4 цифры): название в тексте бывает в разных падежах."""
     return d.case_number[:4] if d.case_number else d.court

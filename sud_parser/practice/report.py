@@ -10,7 +10,7 @@ from openpyxl.utils import get_column_letter
 
 from .analyze import (
     MAIN_OUTCOMES, PracticeResult, article_table, court_key, court_names, money_stats,
-    outcome_table, side_group,
+    osi_pays_stats, outcome_table, side_group,
 )
 from .extract import display_party
 
@@ -139,7 +139,20 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
             ["Прочие расходы (почта, экспертиза, нотариус): всего", money.other_total],
         ])
     else:
-        w.note("Нет решений со взысканием денег.")
+        w.note("Нет решений со взысканием долга в пользу ОСИ.")
+
+    w.title("Взыскано с самого ОСИ, тенге")
+    pays = osi_pays_stats(decisions)
+    if pays:
+        w.table(["Показатель", "Значение"], [
+            ["Решений, где суд взыскал деньги с ОСИ", pays.decisions],
+            ["Всего взыскано с ОСИ", pays.total],
+            ["из них услуги представителя", pays.lawyer_total],
+            ["из них госпошлина", pays.state_fee_total],
+        ])
+    else:
+        w.note("Нет решений, где деньги взысканы с ОСИ.")
+    w.note("Суммы выше разделены по строкам «Взыскать с … в пользу …»: в пользу ОСИ и с ОСИ считаются отдельно.")
 
     w.title("Чаще всего применяемые нормы (без процессуальных статей ГПК) — топ-15")
     w.table(["Закон", "Статья", "Решений", *MAIN_OUTCOMES], [
@@ -151,7 +164,9 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
     _table_sheet(wb, "Решения", [
         "Номер дела", "Дата", "Суд", "Судья", "Порядок", "Истец", "Ответчики", "Роль ОСИ", "Против кого",
         "Предмет спора", "Требования истца", "Исход", "Резолютивная часть (начало)",
-        "Долг, ₸", "Неустойка, ₸", "Госпошлина, ₸", "Представитель, ₸", "Прочие расходы, ₸",
+        "В пользу ОСИ: долг, ₸", "В пользу ОСИ: неустойка, ₸", "В пользу ОСИ: госпошлина, ₸",
+        "В пользу ОСИ: представитель, ₸", "В пользу ОСИ: прочие расходы, ₸",
+        "С ОСИ: всего, ₸", "Между другими участниками: всего, ₸",
         "Пунктов «Обязать/Признать»", "Нормы права", "Постановления ВС", "Предупреждения", "Файл",
     ], [
         [
@@ -160,6 +175,7 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
             "; ".join(display_party(p) for p in d.defendants),
             d.osi_role, d.opponent, d.topic, d.claim[:300], d.outcome, d.outcome_text[:300],
             d.amounts.principal, d.amounts.penalty, d.amounts.state_fee, d.amounts.lawyer, d.amounts.other_costs,
+            d.osi_pays.total, d.other_awards.total,
             d.obligations,
             "; ".join(f"{c.law} ст. {c.article}" for c in d.citations if not c.procedural),
             "; ".join(d.resolutions), "; ".join(d.warnings), d.file,

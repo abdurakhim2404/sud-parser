@@ -288,3 +288,36 @@ def test_statistics():
 def test_classify_topic(claim, topic):
     from sud_parser.practice.extract import classify_topic
     assert classify_topic(claim) == topic
+
+
+def test_split_amounts_direction_total_and_each():
+    from sud_parser.practice.extract import FROM_OSI, OTHER, TO_OSI, split_amounts
+    lines = [
+        "Взыскать с Иванова И.И. в пользу Объединения собственников имущества «Дом» задолженность "
+        "в размере 20 000 тенге, возврат уплаченной госпошлины в размере 600 тенге, всего на сумму 20 600 (двадцать "
+        "тысяч шестьсот) тенге.",
+        "Взыскать с объединения собственников имущества «Дом» в пользу Петрова П.П., Сидоровой С.С. судебные "
+        "расходы по оплате государственной пошлины в размере 3 692 (три тысячи) тенге каждому.",
+        "Взыскать с Иванова И.И. в пользу Петрова П.П. расходы по госпошлине 1 846 тенге.",
+    ]
+    out = split_amounts(lines, osi_plaintiff=True)
+    assert out[TO_OSI].principal == 20_000          # «всего 20 600» не добавляется второй раз
+    assert out[TO_OSI].state_fee == 600
+    assert out[FROM_OSI].state_fee == 7_384         # 3 692 × 2 получателя
+    assert out[OTHER].state_fee == 1_846
+
+
+def test_citation_variants():
+    text = (
+        "согласно статье 43 ЗРК «О жилищных отношениях» решение недействительно. "
+        "В силу статьи 43 Республики Казахстан «О жилищных отношениях» (далее - Закон). "
+        "Руководствуясь статьями 48, части 3 статьи 169 ГПК, а также статьей 196 Гражданского "
+        "процессуального права (далее – ГПК). Нормативное постановление Верховного Суда Республики "
+        "Казахстан «О судебном решении» по статье 50 Закона."
+    )
+    cits, unresolved = extract_citations(text)
+    got = {(c.law, c.article) for c in cits}
+    assert ("Закон «О жилищных отношениях»", "43") in got
+    assert ("Закон «О жилищных отношениях»", "50") in got
+    assert {("ГПК", "48"), ("ГПК", "169"), ("ГПК", "196")} <= got
+    assert unresolved == []
