@@ -20,6 +20,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
+from . import kz
+
 # --- исходы ---------------------------------------------------------------------------------
 SATISFIED = "удовлетворён"
 PARTIAL = "удовлетворён частично"
@@ -39,16 +41,18 @@ MONTHS = {
     "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
 }
 # Номер дела: «7514-25-00-2/27138»; бывает и с обратной косой чертой «7514-25-00-2\4027».
-CASE_NO_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-[0-9A-Za-zА-Яа-я]{1,3}[/\\]\d+)")
+CASE_NO_RE = re.compile(r"(\d{4}[-–]\d{2}[-–]\d{2}[-–][0-9A-Za-zА-Яа-я]{1,3}[/\\]\d+)")  # бывает «7527–24-00-2/15005»
 DATE_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s*(?:года?\b|г\.)", re.I)  # «2025 года», «2025год», «2025 г.»
 
 OSI_RE = re.compile(
-    r"объединени\w*\s+собственник|\bОСИ\b|\bП?КСК\b|кооператив\w*\s+собственник|простое\s+товариществ",
+    r"объединени\w*\s+собственник|\bОСИ\b|\bП?КСК\b|кооператив\w*\s+собственник|простое\s+товариществ|"
+    + kz.OSI_KZ,
     re.I,
 )
 ORG_RE = re.compile(
     r"[«\"]|\bТОО\b|\bАО\b|\bНАО\b|\bИП\b|\bГУ\b|\bРГП\b|\bГКП\b|товариществ|обществ|учреждени|"
-    r"предприяти|корпораци|компани|филиал|акимат|департамент|управлени|министерств|комитет|банк",
+    r"предприяти|корпораци|компани|филиал|акимат|департамент|управлени|министерств|комитет|банк|"
+    + kz.ORG_KZ,
     re.I,
 )
 
@@ -62,13 +66,14 @@ HEADINGS = (
 # Не «ТРЕБОВАНИЙ НА ПРЕДМЕТ СПОРА» — это вторая строка заголовка «ТРЕТЬИ ЛИЦА, НЕ ЗАЯВЛЯЮЩИЕ …».
 CLAIM_HEADINGS = ("ТРЕБОВАНИЯ", "ТРЕБОВАНИЕ", "ЗАЯВЛЕНН", "ИСКОВЫЕТРЕБОВАН")
 OPERATIVE = ("РЕШИЛ", "СУДРЕШИЛ", "ПОСТАНОВИЛ", "ОПРЕДЕЛИЛ")
-OPERATIVE_INLINE_RE = re.compile(r"(?<![А-ЯЁ])Р\s?Е\s?Ш\s?И\s?Л\s*:")
-COUNTER_RE = re.compile(r"встречн", re.I)
+OPERATIVE_INLINE_RE = re.compile(r"(?<![А-ЯЁ])Р\s?Е\s?Ш\s?И\s?Л\s*:|" + kz.OPERATIVE_INLINE_KZ)
+COUNTER_RE = re.compile(r"встречн|" + kz.COUNTER_KZ, re.I)
 
 # Строки резолютивной части, которые разъясняют порядок обжалования, а не решают спор.
 BOILERPLATE_RE = re.compile(
     r"^(на решение|на определение|ответчики? вправе|заявление подается|апелляционн|"
-    r"решение (суда )?может быть обжаловано|решение суда может|решение может быть обжаловано)",
+    r"решение (суда )?может быть обжаловано|решение суда может|решение может быть обжаловано|"
+    + kz.BOILERPLATE_KZ + ")",
     re.I,
 )
 
@@ -221,6 +226,9 @@ def _heading(line: str) -> tuple[str, str] | None:
     if not letters or any(c.islower() for c in letters):
         return None
     key = _compact(head)
+    kz_key = kz.heading_key(key)  # «ТАЛАП ҚОЮШЫ:» -> «ИСТЕЦ» и т. д.
+    if kz_key:
+        return kz_key, rest.strip()
     for h in HEADINGS:
         if key.startswith(h):
             return key, rest.strip()
@@ -430,14 +438,19 @@ def extract_citations(text: str) -> tuple[list[Citation], list[str]]:
             continue
         for article in _expand_articles(m.group(1)):
             found[Citation(law, article)] = None
-    return list(found), unresolved
+    # Казахский текст: «АПК-нің 223-226-баптарын», «Заңның 42-1-бабы».
+    kz_found, kz_unresolved = kz.extract_citations_kz(text, _expand_articles)
+    for law, article in kz_found:
+        found[Citation(law, article)] = None
+    return list(found), unresolved + kz_unresolved
 
 
 # --- исход и суммы ---------------------------------------------------------------------------
 
 def classify_outcome(operative: str) -> str:
-    # «удовлеторить» — опечатка, встречается в решениях.
-    op = re.sub(r"\bудовлет\w{0,2}рить\b", "удовлетворить", operative.lower())
+    # «удовлеторить» — опечатка, встречается в решениях. Казахские формулировки переводятся в русские.
+    op = kz.outcome_to_russian(operative.lower())
+    op = re.sub(r"\bудовлет\w{0,2}рить\b", "удовлетворить", op)
     partial = re.search(r"удовлетворить\s+частично|частично\s+удовлетворить", op)
     satisfy = re.search(r"\bудовлетворить\b", op)
     rest_refused = re.search(r"остальной\s+части[^.]*?отказать|отказать[^.]*?остальной\s+части", op)
@@ -458,31 +471,40 @@ def classify_outcome(operative: str) -> str:
 # «… тенге», а иногда без слова «тенге»: «50435,68 (прописью) 68 тиын».
 MONEY_RE = re.compile(
     r"(?<![\d.,])(\d{1,3}(?:[  ]\d{3})+|\d+)(?:[.,](\d{1,2}))?(?!\d)"
-    r"\s*(?:тенге|тг\b|(?<=\s)(?=\d{1,2}\s*тиын))",
+    r"\s*(?:тенге|теңге|тг\b|(?<=\s)(?=\d{1,2}\s*тиын))",
     re.I,
 )
 MONEY_KINDS = (
-    ("state_fee", re.compile(r"пошлин", re.I)),
-    ("lawyer", re.compile(r"представител|юридическ\w* (?:услуг|помощ)", re.I)),
-    ("penalty", re.compile(r"неустойк|\bпен[еиьяю]", re.I)),
-    ("other_costs", re.compile(r"почтов|нотариал|эксперт|издерж|транспортн|курьер", re.I)),
+    ("state_fee", re.compile(r"пошлин|" + kz.MONEY_KINDS_KZ["state_fee"], re.I)),
+    ("lawyer", re.compile(r"представител|юридическ\w* (?:услуг|помощ)|" + kz.MONEY_KINDS_KZ["lawyer"], re.I)),
+    ("penalty", re.compile(r"неустойк|\bпен[еиьяю]|" + kz.MONEY_KINDS_KZ["penalty"], re.I)),
+    ("other_costs", re.compile(r"почтов|нотариал|эксперт|издерж|транспортн|курьер|"
+                               + kz.MONEY_KINDS_KZ["other_costs"], re.I)),
 )
-PRINCIPAL_RE = re.compile(r"задолж|долг|накоплен|взнос|капитальн", re.I)
-COSTS_RE = re.compile(r"расход|оплат", re.I)
+PRINCIPAL_RE = re.compile(r"задолж|долг|накоплен|взнос|капитальн|" + kz.PRINCIPAL_KZ, re.I)
+COSTS_RE = re.compile(r"расход|оплат|" + kz.COSTS_KZ, re.I)
 
 
-def _money_kind(context: str) -> str:
-    kind = next((k for k, rx in MONEY_KINDS if rx.search(context)), None)
+def _kind_or_none(context: str) -> str | None:
+    return next((k for k, rx in MONEY_KINDS if rx.search(context)), None)
+
+
+def _money_kind(context: str, after: str = "") -> str:
+    """Вид суммы по словам перед ней; в казахском тексте вид часто стоит после суммы:
+    «333 333 теңге өкілдің қызметі үшін» — поэтому смотрим и на `after`."""
+    kind = _kind_or_none(context) or (_kind_or_none(after) if after else None)
     if kind:
         return kind
+    both = context + " " + after
     # «расходы по оплате 2594 тенге» без уточнения — это судебные расходы, а не долг.
-    if COSTS_RE.search(context) and not PRINCIPAL_RE.search(context):
+    if COSTS_RE.search(both) and not PRINCIPAL_RE.search(both):
         return "other_costs"
     return "principal"
 
 
 # «…, всего 20 600 тенге» — это сумма уже перечисленного, второй раз её не считаем.
-TOTAL_RE = re.compile(r"\b(?:всего|итого|в\s+общей\s+сумме|на\s+общую\s+сумму)\b", re.I)
+TOTAL_RE = re.compile(r"\b(?:всего|итого|в\s+общей\s+сумме|на\s+общую\s+сумму|" + kz.TOTAL_KZ + r")\b", re.I)
+AWARD_RE = re.compile(r"\bвзыскать\b|" + kz.AWARD_KZ, re.I)
 # Без \b перед «в»: в решениях бывает «…Ивановныв пользу» — пробел пропущен.
 PAYER_PAYEE_RE = re.compile(r"\bвзыскать\b(?P<payer>.*?)в\s+пользу\b(?P<payee>.*)", re.I)
 # Где кончается название получателя и начинается «за что»: «… в пользу ОСИ «Х» задолженность …».
@@ -494,9 +516,9 @@ TO_OSI, FROM_OSI, OTHER = "в пользу ОСИ", "с ОСИ", "между д�
 
 
 def _award_lines(operative_lines: list[str]):
-    """Строки «Взыскать …» без сумм прописью в скобках."""
+    """Строки «Взыскать …» («… өндірілсін») без сумм прописью в скобках."""
     for line in operative_lines:
-        if not re.search(r"\bвзыскать\b", line, re.I):
+        if not AWARD_RE.search(line):
             continue
         clean = line
         while re.search(r"\([^()]*\)", clean):
@@ -518,9 +540,11 @@ def _line_amounts(clean: str) -> tuple[Amounts, bool]:
     breakdown = False
     for fragment in re.split(r";|,\s+(?=[^\d\s])", clean):
         prev_end = 0
-        for m in MONEY_RE.finditer(fragment):
+        matches = list(MONEY_RE.finditer(fragment))
+        for n, m in enumerate(matches):
             context = fragment[prev_end:m.start()]
             prev_end = m.end()
+            after = fragment[m.end():matches[n + 1].start() if n + 1 < len(matches) else len(fragment)]
             if TOTAL_RE.search(context):
                 continue
             per_person = re.search(r"\bпо\s*$", context, re.I) and EACH_RE.search(fragment[m.end():m.end() + 40])
@@ -532,9 +556,10 @@ def _line_amounts(clean: str) -> tuple[Amounts, bool]:
             value = _parse_money(m.group(1), m.group(2))
             # «671 874 тенге 18 тиын» — тиыны после слова «тенге»
             tiyn = re.match(r"\s*(\d{1,2})\s*тиын", fragment[m.end():], re.I)
-            if tiyn and not m.group(2) and re.search(r"тенге|тг", m.group(0), re.I):
+            if tiyn and not m.group(2) and re.search(r"тенге|теңге|тг", m.group(0), re.I):
                 value = round(value + int(tiyn.group(1)) / 100, 2)
-            amounts.add(_money_kind(context), value)
+            kazakh = re.search(kz.AWARD_KZ, clean, re.I)
+            amounts.add(_money_kind(context, after if kazakh else ""), value)
     return amounts, breakdown
 
 
@@ -544,6 +569,13 @@ def _parties_count(segment: str) -> int:
 
 def _each_multiplier(clean: str) -> int:
     """«по 3 692 тенге каждому» — на каждого получателя; «по 125 000 с каждого» — с каждого плательщика."""
+    kz_parts = kz.split_payer_payee(clean)
+    if kz_parts and re.search(kz.PAYER_EACH_KZ, clean, re.I):
+        # «А-дан, Б-дан, В-дан әр қайсысынан … 333 333 теңге … өндірілсін» — с каждого
+        payer = re.sub(kz.PAYER_EACH_KZ, "", kz_parts[0], flags=re.I)
+        return _parties_count(re.sub(kz.ROLE_WORDS_KZ, "", payer, flags=re.I))
+    if kz_parts and re.search(kz.PAYEE_EACH_KZ, clean, re.I):
+        return _parties_count(re.sub(kz.ROLE_WORDS_KZ, "", kz_parts[1], flags=re.I))
     if not EACH_RE.search(clean):
         return 1
     m = PAYER_PAYEE_RE.search(clean)
@@ -558,9 +590,12 @@ def _each_multiplier(clean: str) -> int:
 def award_direction(clean: str, osi_plaintiff: bool) -> str:
     """Кто кому платит по строке «Взыскать с X в пользу Y»."""
     m = PAYER_PAYEE_RE.search(clean)
+    kz_parts = None if m else kz.split_payer_payee(clean)
     if m:
         payer = m.group("payer")
         payee = PAYEE_END_RE.split(m.group("payee"), maxsplit=1)[0]
+    elif kz_parts:  # «Жауапкерден талап қоюшының пайдасына … өндірілсін»
+        payer, payee = kz_parts
     else:  # «Взыскать с Иванова задолженность …» — получатель не назван
         payer, payee = clean, ""
     if OSI_RE.search(payee) and OSI_RE.search(payer):
@@ -590,12 +625,16 @@ def _osi_share(clean: str) -> float:
 
     При солидарном взыскании (и когда доли не названы) каждый отвечает за всю сумму — доля 1.
     """
-    if not re.search(r"долев|равных\s+дол", clean, re.I):
+    if not re.search(r"долев|равных\s+дол|үлестік|тең\s+үлес", clean, re.I):
         return 1.0
     m = PAYER_PAYEE_RE.search(clean)
-    if not m:
-        return 1.0
-    payer = re.sub(r"^\s*(?:в\s+\w+\s+порядке\s+)?с\s+", "", m.group("payer"), flags=re.I)
+    if m:
+        payer = re.sub(r"^\s*(?:в\s+\w+\s+порядке\s+)?с\s+", "", m.group("payer"), flags=re.I)
+    else:
+        kz_parts = kz.split_payer_payee(clean)
+        if not kz_parts:
+            return 1.0
+        payer = re.sub(kz.ROLE_WORDS_KZ, "", kz_parts[0], flags=re.I)
     payers = split_parties([re.sub(r"\s+и\s+", ", ", payer)])
     return 1.0 / len(payers) if len(payers) > 1 else 1.0
 
@@ -618,7 +657,7 @@ def split_amounts(operative_lines: list[str], osi_plaintiff: bool) -> dict[str, 
 
 def classify_topic(claim: str) -> str:
     for name, rx in TOPICS:
-        if rx.search(claim):
+        if rx.search(claim) or (name in kz.TOPICS_KZ and re.search(kz.TOPICS_KZ[name], claim, re.I)):
             return name
     return "Другое" if claim else ""
 
@@ -628,6 +667,9 @@ def classify_topic(claim: str) -> str:
 def _doc_type(lines: list[str]) -> str:
     for line in lines[:8]:
         key = _compact(line)
+        for prefix in kz.TITLE_PREFIXES:  # «ҚАЗАҚСТАН РЕСПУБЛИКАСЫНЫҢ АТЫНАН ШЕШІМ» одной строкой
+            if key.startswith(prefix) and len(key) > len(prefix):
+                key = key[len(prefix):]
         if not key or len(key) > 30:
             continue
         for marker, name in (
@@ -636,6 +678,7 @@ def _doc_type(lines: list[str]) -> str:
             ("РЕШЕНИЕ", "решение"),
             ("ОПРЕДЕЛЕНИЕ", "определение"),
             ("ПОСТАНОВЛЕНИЕ", "постановление"),
+            *kz.DOC_TYPES_KZ,
         ):
             if key.startswith(marker):
                 return name
@@ -648,15 +691,24 @@ _LATIN_LOOKALIKES = str.maketrans("aceopxyACEOPXHKMBT", "асеорхуАСЕО�
 
 def _parse_date(text: str) -> date | None:
     m = DATE_RE.search(text.translate(_LATIN_LOOKALIKES))
-    if not m:
-        return None
     try:
-        return date(int(m.group(3)), MONTHS[m.group(2).lower()], int(m.group(1)))
+        if m:
+            return date(int(m.group(3)), MONTHS[m.group(2).lower()], int(m.group(1)))
+        m = kz.DATE_KZ_RE.search(text)  # «2025 жылғы 6 қараша»
+        if m:
+            return date(int(m.group(1)), kz.MONTHS_KZ[m.group(3).lower()], int(m.group(2)))
     except ValueError:
         return None
+    return None
 
 
 def _court(header: list[str]) -> str:
+    for line in header:  # «Қызылорда қалалық сотының құрамында:»
+        m = kz.COURT_KZ_RE.match(line)
+        if m and re.search(r"\bсот(?:ы|ының|тың)?\s*(?:құрамында|судьясы|$|,|:)", line, re.I) \
+                and not re.match(r"\s*(?:сот\s+отырыс|төрағалық)", line, re.I):
+            court = _norm(m.group(1))
+            return re.sub(r"\bсот(?:ының|тың)$", "соты", court)
     for i, line in enumerate(header):
         if not re.search(r"\bсуд\w*\b", line, re.I):
             continue
@@ -700,6 +752,7 @@ def _judge(lines: list[str], header_text: str) -> str:
 
 
 def parse_decision(text: str, file: str = "") -> Decision:
+    text = kz.fix_latin_i(text)  # «Кодекстiң» с латинской «i» -> «Кодекстің»
     lines = [l.rstrip() for l in text.replace("\r", "").split("\n")]
     nonempty = []
     for l in lines:
@@ -719,12 +772,13 @@ def parse_decision(text: str, file: str = "") -> Decision:
     header_text = _norm(" ".join(header))
 
     # Номер дела и дата: строка с номером обычно содержит и дату (в шапке или в таблице внизу).
-    m = CASE_NO_RE.search(text)
+    m = CASE_NO_RE.search(text) or kz.OLD_CASE_NO_RE.search(text)  # старый формат: «Іс №2-4397/24»
     if m:
         line = next(l for l in nonempty if m.group(1) in l)
-        d.case_number = m.group(1).replace("\\", "/")
+        d.case_number = m.group(1).replace("\\", "/").replace("–", "-")
         d.date = _parse_date(line)
-        city = re.search(r"(?:город|г\.)\s*([А-ЯЁӘІҢҒҮҰҚӨҺ][а-яёәіңғүұқөһ\-]+)", line)
+        city = re.search(r"(?:город|г\.)\s*([А-ЯЁӘІҢҒҮҰҚӨҺ][а-яёәіңғүұқөһ\-]+)", line) \
+            or kz.CITY_KZ_RE.search(line)  # «Қызылорда қаласы»
         d.city = city.group(1) if city else ""
     if d.date is None:
         d.date = _parse_date(" ".join(nonempty[:12]))
@@ -732,9 +786,9 @@ def parse_decision(text: str, file: str = "") -> Decision:
     d.court = _court(header)
     d.judge = _judge(nonempty, header_text)
     low = header_text.lower()
-    if "упрощенн" in low or "упрощённ" in low:
+    if "упрощенн" in low or "упрощённ" in low or re.search(kz.SIMPLIFIED_KZ, low):
         d.procedure = "упрощённое (письменное)"
-    elif "заседани" in low:
+    elif "заседани" in low or re.search(kz.HEARING_KZ, low):
         d.procedure = "судебное заседание"
 
     d.plaintiffs = split_parties(_block(blocks, "ИСТЕЦ", "ИСТЦЫ", "ЗАЯВИТЕЛ") or [])
@@ -769,7 +823,8 @@ def parse_decision(text: str, file: str = "") -> Decision:
 
     d.topic = classify_topic(d.claim or d.outcome_text)
     d.citations, unresolved = extract_citations(text)
-    d.resolutions = sorted({_norm(m.group(1)) for m in RESOLUTION_RE.finditer(text)})
+    d.resolutions = sorted({_norm(m.group(1)) for rx in (RESOLUTION_RE, kz.RESOLUTION_KZ_RE)
+                            for m in rx.finditer(text)})
 
     if not d.case_number:
         d.warnings.append("номер дела не найден")
@@ -780,7 +835,7 @@ def parse_decision(text: str, file: str = "") -> Decision:
     if d.is_decision:
         if not d.plaintiffs:
             d.warnings.append("истец не найден")
-        if not d.defendants:
+        if not d.defendants and not _block(blocks, "ЗАЯВИТЕЛ"):  # в особом производстве ответчика нет
             d.warnings.append("ответчик не найден")
         if not d.claim:
             d.warnings.append("требования истца не найдены")

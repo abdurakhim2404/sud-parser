@@ -13,7 +13,8 @@ python -m sud_parser.practice --dir "C:\Users\Admin\Documents\sud-decisions"
 ```
 
 - **Вход:** папка с решениями `.docx`, `.rtf` или `.txt` (файл `.doc` тоже читается, если внутри это `.docx`
-  или `.rtf`; старый двоичный `.doc` нужно пересохранить в Word как `.docx`). Решения скачиваются
+  или `.rtf`; старый двоичный `.doc` нужно пересохранить в Word как `.docx`), на русском или казахском
+  языке. Решения скачиваются
   из «Банка судебных актов» portal-sot.kz после входа по ЭЦП.
 - **Выход:** `reports/practice_<дата>.xlsx`, листы:
   - «Сводка»: исходы по сторонам спора, предмету спора, судам, порядку рассмотрения; суммы; частые статьи;
@@ -26,6 +27,7 @@ python -m sud_parser.practice --dir "C:\Users\Admin\Documents\sud-decisions"
 |---|---|
 | `sud_parser/practice/reader.py` | чтение .docx/.txt, включая таблицы в документе |
 | `sud_parser/practice/extract.py` | разбор одного решения: стороны, исход, суммы, статьи |
+| `sud_parser/practice/kz.py` | казахские слова и шаблоны: заголовки, исход, суммы, даты, ссылки на законы |
 | `sud_parser/practice/analyze.py` | отбор решений (без дублей и определений) и статистика |
 | `sud_parser/practice/report.py` | Excel-отчёт |
 

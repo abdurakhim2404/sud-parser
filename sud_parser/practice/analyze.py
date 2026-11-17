@@ -167,7 +167,8 @@ class MoneyStats:
 
 
 def money_stats(decisions: list[Decision]) -> MoneyStats | None:
-    with_money = [d for d in decisions if d.amounts.principal > 0]
+    # Только дела, где ОСИ — сторона: иначе в статистику ОСИ попали бы чужие взыскания.
+    with_money = [d for d in decisions if d.amounts.principal > 0 and d.osi_role != "нет"]
     if not with_money:
         return None
     principals = [d.amounts.principal for d in with_money]
@@ -194,7 +195,7 @@ class OsiPaysStats:
 
 def osi_pays_stats(decisions: list[Decision]) -> OsiPaysStats | None:
     """Сколько суды взыскали с самого ОСИ (обычно судебные расходы выигравшей стороны)."""
-    paying = [d for d in decisions if d.osi_pays.total > 0]
+    paying = [d for d in decisions if d.osi_pays.total > 0 and d.osi_role != "нет"]
     if not paying:
         return None
     return OsiPaysStats(
