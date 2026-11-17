@@ -164,4 +164,6 @@ def _read_docx(path: Path) -> str:
 
 
 def list_files(folder: Path) -> list[Path]:
-    return sorted(p for p in folder.iterdir() if p.is_file() and not p.name.startswith("~$"))
+    """Файлы решений в папке. Пропускаются временные файлы Word (~$…) и служебные файлы сборщика (_manifest.csv)."""
+    return sorted(p for p in folder.iterdir()
+                  if p.is_file() and not p.name.startswith(("~$", "_")))

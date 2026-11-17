@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><title>Учебная копия банка актов</title>
+<!-- Упрощённая копия разметки portal-sot.kz для теста сборщика: список дел, дело, документ, листалка.
+     Данные выдуманные. Вторая страница с первого нажатия показывает ту же страницу, как настоящий портал. -->
+<body><main id="app"></main>
+<script>
+const PAGES = [
+  [["1111-25-00-2/1", "удовлетворено", "Жилищные"], ["1111-25-00-2/2", "отказано", "Жилищные"]],
+  [["1111-25-00-2/3", "удовлетворено частично", "Жилищные"]],
+];
+const DOCS = {
+  "1111-25-00-2/1": [["решение первой инстанции (окончательное)", "Иванов - ОСИ Тест - решение.docx"],
+                     ["определение", "Иванов - определение.docx"]],
+  "1111-25-00-2/2": [["определение о возврате", "возврат.docx"]],
+  "1111-25-00-2/3": [["решение первой инстанции", "Петров - ОСИ - реш.docx"]],
+};
+let page = 0, clicksNext = 0, view = "list", caseNo = null, doc = null;
+const app = document.getElementById("app");
+const btn = (text, fn) => { const b = document.createElement("button"); b.type = "button"; b.textContent = text; b.onclick = fn; return b; };
+function render() {
+  app.innerHTML = "";
+  if (view === "list") {
+    app.append("Найдено дел: 3");
+    const t = document.createElement("table"); const tb = document.createElement("tbody");
+    for (const [num, res, cat] of PAGES[page]) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${num}<div>Гражданские дела</div></td><td>Стороны</td><td>Суд</td><td>${res}</td><td>${cat}</td>`;
+      tr.querySelector("td div").onclick = () => { caseNo = num; view = "case"; render(); };
+      tb.append(tr);
+    }
+    t.append(tb); app.append(t);
+    const nav = document.createElement("nav"); nav.setAttribute("aria-label", "pagination");
+    const ul = document.createElement("ul");
+    const li1 = document.createElement("li"); li1.append(btn("", () => { page = 0; render(); }));
+    const li2 = document.createElement("li"); li2.append(btn("", () => {
+      clicksNext++; if (clicksNext > 1 && page < PAGES.length - 1) page++; render(); }));
+    ul.append(li1, li2); nav.append(ul); app.append(nav);
+  } else if (view === "case") {
+    app.append(btn("Вернуться к списку найденных дел", () => { view = "list"; render(); }));
+    app.append(`Дело № ${caseNo}`);
+    const t = document.createElement("table"); const tb = document.createElement("tbody");
+    for (const [kind, name] of DOCS[caseNo]) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>01.01.2025</td><td>${kind}</td><td></td>`;
+      tr.children[2].append(btn(name, () => { doc = name; view = "doc"; render(); }));
+      tb.append(tr);
+    }
+    t.append(tb); app.append(t);
+  } else {
+    app.append(btn("Вернуться к делу", () => { view = "case"; render(); }));
+    app.append(btn("Скачать", () => {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob(["текст решения " + doc]));
+      a.download = doc; document.body.append(a); a.click(); a.remove();
+    }));
+  }
+}
+render();
+</script>
+</body></html>
