@@ -82,30 +82,59 @@ def side_group(d: Decision) -> str:
     return "ОСИ (КСК) с обеих сторон"
 
 
-def osi_won(d: Decision) -> bool | None:
-    """Выиграло ли ОСИ хотя бы частично. None — если исход или роль ОСИ не определены."""
-    if d.outcome not in MAIN_OUTCOMES:
+WON, PARTLY, LOST = "выиграло", "частично", "проиграло"
+
+
+def osi_result(d: Decision) -> str | None:
+    """Чем дело кончилось для ОСИ. None — если исход или роль ОСИ не определены.
+
+    Иск удовлетворён частично — это «частично» для любой стороны: истец получил не всё,
+    ответчик отбился не от всего. Раньше частичное удовлетворение считалось победой
+    ОСИ-истца, но поражением ОСИ-ответчика; теперь правило одинаковое для обеих сторон.
+    """
+    if d.outcome not in MAIN_OUTCOMES or d.osi_role not in ("истец", "ответчик"):
         return None
-    if d.osi_role == "истец":
-        return d.outcome in (SATISFIED, PARTIAL)
-    if d.osi_role == "ответчик":
-        return d.outcome == REFUSED
-    return None
+    if d.outcome == PARTIAL:
+        return PARTLY
+    plaintiff_won = d.outcome == SATISFIED
+    return WON if plaintiff_won == (d.osi_role == "истец") else LOST
+
+
+def osi_won(d: Decision) -> bool | None:
+    """Выиграло ли ОСИ хотя бы частично."""
+    r = osi_result(d)
+    return None if r is None else r != LOST
 
 
 @dataclass
 class OutcomeRow:
     label: str
     counts: Counter
-    won: int
-    known: int
+    results: Counter  # WON / PARTLY / LOST для ОСИ
 
     @property
     def total(self) -> int:
         return sum(self.counts.values())
 
     @property
+    def won(self) -> int:
+        return self.results[WON]
+
+    @property
+    def partly(self) -> int:
+        return self.results[PARTLY]
+
+    @property
+    def lost(self) -> int:
+        return self.results[LOST]
+
+    @property
+    def known(self) -> int:
+        return self.won + self.partly + self.lost
+
+    @property
     def win_share(self) -> float | None:
+        """Доля полных побед ОСИ среди дел, где ОСИ — сторона."""
         return self.won / self.known if self.known else None
 
 
@@ -115,12 +144,10 @@ def outcome_table(decisions: list[Decision], key) -> list[OutcomeRow]:
         groups[key(d)].append(d)
     rows = []
     for label, items in groups.items():
-        wins = [osi_won(d) for d in items]
         rows.append(OutcomeRow(
             label=label,
             counts=Counter(d.outcome for d in items),
-            won=sum(1 for w in wins if w),
-            known=sum(1 for w in wins if w is not None),
+            results=Counter(r for r in map(osi_result, items) if r),
         ))
     rows.sort(key=lambda r: (-r.total, r.label))
     return rows

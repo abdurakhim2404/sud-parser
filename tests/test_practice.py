@@ -261,7 +261,7 @@ def test_statistics():
     decisions = select_decisions([parse_decision(DEBT), parse_decision(REFUSAL), parse_decision(PARTIAL_TEXT)]).decisions
     rows = {r.label: r for r in outcome_table(decisions, side_group)}
     persons = rows["ОСИ — истец, против: физлица"]
-    assert (persons.total, persons.won, persons.known) == (2, 2, 2)
+    assert (persons.total, persons.won, persons.partly, persons.known) == (2, 1, 1, 2)
     orgs = rows["ОСИ — истец, против: организации"]
     assert (orgs.total, orgs.won) == (1, 0)
     assert [osi_won(d) for d in decisions].count(False) == 1
@@ -273,11 +273,36 @@ def test_statistics():
     assert money.principal_max == 3_740_430.81
 
 
+def test_osi_result_partial_is_the_same_for_both_sides():
+    from sud_parser.practice.analyze import LOST, PARTLY, WON, osi_result
+    from sud_parser.practice.extract import Decision
+    osi, person = "ОСИ «Дом»", "Иванов И.И."
+    as_plaintiff = dict(plaintiffs=[osi], defendants=[person])
+    as_defendant = dict(plaintiffs=[person], defendants=[osi])
+    cases = [
+        (as_plaintiff, SATISFIED, WON), (as_plaintiff, PARTIAL, PARTLY), (as_plaintiff, REFUSED, LOST),
+        (as_defendant, REFUSED, WON), (as_defendant, PARTIAL, PARTLY), (as_defendant, SATISFIED, LOST),
+    ]
+    for sides, outcome, expected in cases:
+        assert osi_result(Decision(file="", outcome=outcome, **sides)) == expected
+    assert osi_result(Decision(file="", outcome=SATISFIED, plaintiffs=[person], defendants=["ТОО «Строй»"])) is None
+
+
+
 @pytest.mark.parametrize("claim, topic", [
     ("о признании недействительным протокола собрания в части избрания председателя ОСИ «Абая 1»",
-     "Оспаривание решений собраний, актов и действий"),
-    ("о признании незаконными действия по повторному предъявлению задолженности",
-     "Оспаривание решений собраний, актов и действий"),
+     "Оспаривание решений собраний (протоколов)"),
+    ("о признании незаконными действия по повторному предъявлению задолженности, об обязании внести "
+     "изменения в бухгалтерскую документацию", "Оспаривание действий и актов (ОСИ, застройщика, госорганов)"),
+    ("о признании незаконным бездействия и истребовании документации",
+     "Передача и предоставление документов, информации"),
+    ("о понуждении передать документы, а также копии протоколов общего собрания",
+     "Передача и предоставление документов, информации"),
+    ("1.Об установлении факта трудовых отношений 2.О взыскании задолженности по заработной плате",
+     "Трудовые споры"),
+    ("о возмещении ущерба, причинённого затоплением квартиры", "Возмещение ущерба (затопление и т. п.)"),
+    ("Тұрғын үй кешені тұрғындарының жиналысы хаттамасының күшін жою туралы",
+     "Оспаривание решений собраний (протоколов)"),
     ("о взыскании задолженности", "Взыскание задолженности по взносам и расходам на содержание"),
     ("об обязании предоставить документы", "Передача и предоставление документов, информации"),
     ("О возложении обязанности предоставить акт сверки", "Передача и предоставление документов, информации"),
@@ -472,7 +497,7 @@ def test_kazakh_decision():
     assert d.judge == "Тестов Т.Т."
     assert d.procedure == "судебное заседание"
     assert len(d.plaintiffs) == 2 and d.osi_role == "ответчик" and d.opponent == "физлица"
-    assert d.topic == "Оспаривание решений собраний, актов и действий"
+    assert d.topic == "Оспаривание решений собраний (протоколов)"
     assert d.outcome == REFUSED                      # «қанағаттандырудан толығымен бас тартылсын»
     assert d.amounts.lawyer == 200_000               # 100 000 × 2 плательщика («әр қайсысынан»)
     assert d.other_awards.state_fee == 4_604.28      # в доход государства, с тиынами

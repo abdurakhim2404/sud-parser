@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Файлов: {result.files_total}, решений в анализе: {len(result.decisions)}, "
           f"исключено: {len(result.excluded)}, не прочитано: {len(result.errors)}")
     for row in outcome_table(result.decisions, side_group):
-        print(f"  {row.label}: {row.total} реш., ОСИ выиграло хотя бы частично: {row.won} из {row.known}")
+        print(f"  {row.label}: {row.total} реш.; ОСИ выиграло {row.won}, частично {row.partly}, проиграло {row.lost}")
     flagged = [d for d in result.decisions if d.warnings]
     if flagged:
         print(f"Проверить вручную ({len(flagged)}):")

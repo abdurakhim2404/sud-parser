@@ -18,7 +18,12 @@ HEADER_FILL = PatternFill("solid", fgColor="DDEBF7")
 TITLE_FONT = Font(bold=True, size=12)
 SMALL_SAMPLE = 30  # меньше — проценты показываем, но с предупреждением
 
-OUTCOME_HEADER = ["Удовлетворён", "Частично", "Отказано", "Прочее", "Всего", "ОСИ выиграло (хотя бы частично)"]
+OUTCOME_HEADER = ["Удовлетворён", "Частично", "Отказано", "Прочее", "Всего",
+                  "ОСИ выиграло", "ОСИ частично", "ОСИ проиграло"]
+
+
+RULE_NOTE = ("«ОСИ выиграло»: ОСИ-истцу иск удовлетворён полностью или ОСИ-ответчику в иске отказано. "
+             "«Частично»: иск удовлетворён частично, кто бы ни был истцом. Проценты — от дел, где ОСИ сторона спора.")
 
 
 def _pct(part: int, whole: int) -> str:
@@ -29,7 +34,8 @@ def outcome_rows(rows) -> list[list]:
     out = []
     for r in rows:
         other = r.total - sum(r.counts[o] for o in MAIN_OUTCOMES)
-        out.append([r.label, *(r.counts[o] for o in MAIN_OUTCOMES), other, r.total, _pct(r.won, r.known)])
+        out.append([r.label, *(r.counts[o] for o in MAIN_OUTCOMES), other, r.total,
+                    _pct(r.won, r.known), _pct(r.partly, r.known), _pct(r.lost, r.known)])
     return out
 
 
@@ -111,6 +117,7 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
 
     w.title("Исходы по сторонам спора")
     w.table(["Кто с кем судится", *OUTCOME_HEADER], outcome_rows(outcome_table(decisions, side_group)))
+    w.note(RULE_NOTE)
 
     counter = [d for d in decisions if d.counter_outcome]
     if counter:

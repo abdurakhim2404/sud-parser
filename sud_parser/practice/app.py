@@ -19,11 +19,11 @@ import streamlit as st  # noqa: E402
 
 from sud_parser.practice.analyze import (  # noqa: E402
     MAIN_OUTCOMES, PracticeResult, analyze_folder, article_table, court_key, court_names,
-    money_stats, osi_pays_stats, osi_won, outcome_table, side_group,
+    money_stats, osi_pays_stats, osi_result, outcome_table, side_group,
 )
 from sud_parser.practice.extract import UNKNOWN, display_party  # noqa: E402
 from sud_parser.practice.reader import SUPPORTED  # noqa: E402
-from sud_parser.practice.report import SMALL_SAMPLE, write_practice_report  # noqa: E402
+from sud_parser.practice.report import RULE_NOTE, SMALL_SAMPLE, write_practice_report  # noqa: E402
 
 st.set_page_config(page_title="Судебная практика ОСИ", page_icon="⚖️", layout="wide")
 
@@ -60,21 +60,20 @@ def outcome_df(decisions, key, title: str) -> pd.DataFrame:
             **{o: r.counts[o] for o in MAIN_OUTCOMES},
             "Прочее": r.total - sum(r.counts[o] for o in MAIN_OUTCOMES),
             "Всего": r.total,
-            "ОСИ выиграло": f"{r.won} из {r.known}" if r.known else "—",
-            "Доля выигрышей ОСИ": round(100 * r.win_share) if r.known else None,
+            "ОСИ выиграло / частично / проиграло": f"{r.won} / {r.partly} / {r.lost}" if r.known else "—",
+            "Доля полных побед ОСИ": round(100 * r.win_share) if r.known else None,
         })
     return pd.DataFrame(rows)
 
 
 def show_outcomes(df: pd.DataFrame) -> None:
     st.dataframe(df, hide_index=True, width="stretch", column_config={
-        "Доля выигрышей ОСИ": st.column_config.ProgressColumn(format="%d%%", min_value=0, max_value=100),
+        "Доля полных побед ОСИ": st.column_config.ProgressColumn(format="%d%%", min_value=0, max_value=100),
     })
 
 
 def won_label(d) -> str:
-    w = osi_won(d)
-    return "—" if w is None else ("да" if w else "нет")
+    return osi_result(d) or "—"
 
 
 def decisions_df(decisions) -> pd.DataFrame:
@@ -87,7 +86,7 @@ def decisions_df(decisions) -> pd.DataFrame:
         "Предмет спора": d.topic or "—",
         "Исход": d.outcome,
         "Встречный иск": d.counter_outcome or "—",
-        "ОСИ выиграло": won_label(d),
+        "Для ОСИ": won_label(d),
         "В пользу ОСИ, ₸": d.amounts.total,
         "С ОСИ, ₸": d.osi_pays.total,
         "Предупреждения": "; ".join(d.warnings),
@@ -158,8 +157,7 @@ with tab_sum:
     counter = sum(1 for d in decisions if d.counter_outcome)
     if counter:
         st.caption(f"Встречный иск был в {counter} решениях. Здесь везде исход основного иска.")
-    st.caption("«ОСИ выиграло»: если ОСИ истец — иск удовлетворён полностью или частично; "
-               "если ответчик — в иске отказано.")
+    st.caption(RULE_NOTE)
 
     st.subheader("По предмету спора")
     show_outcomes(outcome_df(decisions, lambda d: d.topic or "—", "Предмет спора"))
