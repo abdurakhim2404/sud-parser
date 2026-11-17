@@ -170,6 +170,10 @@ class Decision:
     def is_decision(self) -> bool:
         return "решение" in self.doc_type
 
+    def masked(self, text: str) -> str:
+        """Текст решения для отчёта: ФИО людей заменены инициалами."""
+        return mask_text(text, self.plaintiffs + self.defendants + self.third_parties)
+
     @property
     def osi_role(self) -> str:
         roles = []
@@ -224,6 +228,57 @@ def mask_person(name: str) -> str:
 
 def display_party(name: str) -> str:
     return f"{PERSON} {mask_person(name)}" if party_kind(name) == PERSON else name
+
+
+_UP, _LOW = "А-ЯЁӘІҢҒҮҰҚӨҺ", "а-яёәіңғүұқөһ"
+_NAME_WORD = rf"[{_UP}][{_LOW}]+(?:-[{_UP}]?[{_LOW}]+)?"
+# «Бондарева Артура Александровича», «Ахметов Серик Болатұлы»: третье слово — отчество в любом падеже.
+_PATRONYMIC = rf"[{_UP}][{_LOW}]*(?:вич|вн|ұлы|қызы|улы|кызы)[{_LOW}]*"
+# Казахский порядок: «Светлана Олеговна Уразованың» — имя, отчество, фамилия.
+_FULL_NAME_RE = re.compile(
+    rf"\b{_NAME_WORD}\s+{_NAME_WORD}\s+{_PATRONYMIC}|\b{_NAME_WORD}\s+{_PATRONYMIC}\s+{_NAME_WORD}")
+# «Кудабаева Ж.А.», «Ким И. Р.»
+_SHORT_NAME_RE = re.compile(rf"\b{_NAME_WORD}\s+[{_UP}]\.\s?(?:[{_UP}]\.)?")
+
+
+def _initials(text: str) -> str:
+    return " ".join(f"{w[0]}." for w in re.findall(rf"[{_UP}][{_LOW}]*", text)[:3])
+
+
+def _stem(word: str) -> str:
+    return re.escape(word[:-2] if len(word) > 4 else word[:-1] if len(word) > 3 else word)
+
+
+def mask_text(text: str, parties: list[str] = ()) -> str:
+    """Скрыть ФИО людей в куске текста решения (резолютивная часть, требования): остаются инициалы.
+
+    Сначала — стороны дела в любом падеже («Иск Бондарева Артура Александровича»), потом любые
+    «Фамилия Имя Отчество» и «Фамилия И.О.» (представители, третьи лица). Названия ОСИ и компаний
+    не трогаем: в них нет отчества."""
+    # Скрытое имя сразу заменяем меткой, чтобы следующие правила не приняли «Иск Б. А.» за «Фамилия И. О.».
+    hidden: list[str] = []
+
+    def hide(initials: str) -> str:
+        hidden.append(initials)
+        return f"\x00{len(hidden) - 1}\x00"
+
+    for name in parties:
+        if party_kind(name) != PERSON:
+            continue
+        words = re.findall(_NAME_WORD, name)[:3]
+        if len(words) < 2:
+            continue
+        initials = _initials(" ".join(words))
+        full = r"\b" + r"\s+".join(_stem(w) + rf"[{_LOW}]*" for w in words)
+        short = rf"\b{_stem(words[0])}[{_LOW}]*\s+{words[1][0]}\.(?:\s?{words[2][0]}\.)?" if len(words) > 2 \
+            else rf"\b{_stem(words[0])}[{_LOW}]*\s+{words[1][0]}\."
+        text = re.sub(full, lambda m: hide(initials), text)
+        text = re.sub(short, lambda m: hide(initials), text)
+    text = _FULL_NAME_RE.sub(lambda m: hide(_initials(m.group(0))), text)
+    text = _SHORT_NAME_RE.sub(lambda m: hide(_initials(m.group(0))), text)
+    # «… Уразованың.» -> «С. О. У.», а не «С. О. У..»
+    text = re.sub(r"\x00(\d+)\x00\.?", lambda m: hidden[int(m.group(1))], text)
+    return text
 
 
 def _parse_money(number: str, fraction: str | None) -> float:

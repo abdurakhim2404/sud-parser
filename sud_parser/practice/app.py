@@ -249,10 +249,10 @@ with tab_list:
         st.write("**Истцы:** " + ("; ".join(display_party(x) for x in d.plaintiffs) or "—"))
         st.write("**Ответчики:** " + ("; ".join(display_party(x) for x in d.defendants) or "—"))
         st.write(f"**Предмет спора:** {d.topic or '—'}")
-        st.write(f"**Требования:** {d.claim[:600] or '—'}")
+        st.write(f"**Требования:** {d.masked(d.claim[:600]) or '—'}")
     with b:
         st.write(f"**Исход:** {d.outcome}" + (f"  \n**Встречный иск:** {d.counter_outcome}" if d.counter_outcome else ""))
-        st.write(f"**Резолютивная часть:** {d.outcome_text[:600] or '—'}")
+        st.write(f"**Резолютивная часть:** {d.masked(d.outcome_text[:600]) or '—'}")
         st.write(f"**В пользу ОСИ:** {money(d.amounts.total)} · **с ОСИ:** {money(d.osi_pays.total)}")
         laws = [f"{c.law} ст. {c.article}" for c in d.citations if not c.procedural]
         st.write("**Нормы права:** " + ("; ".join(laws) or "—"))
@@ -265,7 +265,7 @@ with tab_laws:
         "Закон": r.citation.law, "Статья": r.citation.article, "Решений": r.decisions,
         **{o: r.outcomes[o] for o in MAIN_OUTCOMES},
     } for r in article_table(decisions, procedural=procedural)]), hide_index=True, width="stretch")
-    unresolved = [(d.case_number, frag) for d in decisions for frag in d.unresolved_citations]
+    unresolved = [(d.case_number, d.masked(frag)) for d in decisions for frag in d.unresolved_citations]
     if unresolved:
         with st.expander(f"Ссылки, где закон не назван ({len(unresolved)})"):
             st.dataframe(pd.DataFrame(unresolved, columns=["Номер дела", "Фрагмент текста"]),

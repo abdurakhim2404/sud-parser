@@ -185,7 +185,7 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
             d.case_number, d.date, d.court, d.judge, d.procedure,
             "; ".join(display_party(p) for p in d.plaintiffs),
             "; ".join(display_party(p) for p in d.defendants),
-            d.osi_role, d.opponent, d.topic, d.claim[:300], d.outcome, d.counter_outcome or "—", d.outcome_text[:300],
+            d.osi_role, d.opponent, d.topic, d.masked(d.claim[:300]), d.outcome, d.counter_outcome or "—", d.masked(d.outcome_text[:300]),
             d.amounts.principal, d.amounts.penalty, d.amounts.state_fee, d.amounts.lawyer, d.amounts.other_costs,
             d.osi_pays.total, d.other_awards.total,
             d.obligations,
@@ -207,7 +207,7 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
     ] + [[name, "", f"не прочитан: {err}"] for name, err in result.errors])
 
     _table_sheet(wb, "Нераспознанные ссылки", ["Номер дела", "Фрагмент текста"], [
-        [d.case_number, frag] for d in decisions for frag in d.unresolved_citations
+        [d.case_number, d.masked(frag)] for d in decisions for frag in d.unresolved_citations
     ])
 
     wb.save(path)
