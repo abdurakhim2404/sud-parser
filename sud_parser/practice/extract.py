@@ -227,18 +227,27 @@ def mask_person(name: str) -> str:
 
 
 def display_party(name: str) -> str:
-    return f"{PERSON} {mask_person(name)}" if party_kind(name) == PERSON else name
+    if party_kind(name) == PERSON:
+        return f"{PERSON} {mask_person(name)}"
+    # В названии ИП и в «… в лице руководителя …» тоже бывают ФИО.
+    name = _REPRESENTED_RE.sub(lambda m: m.group(1) + _initials(m.group(2).title()), name)
+    return mask_text(name)
 
 
 _UP, _LOW = "А-ЯЁӘІҢҒҮҰҚӨҺ", "а-яёәіңғүұқөһ"
 _NAME_WORD = rf"[{_UP}][{_LOW}]+(?:-[{_UP}]?[{_LOW}]+)?"
 # «Бондарева Артура Александровича», «Ахметов Серик Болатұлы»: третье слово — отчество в любом падеже.
-_PATRONYMIC = rf"[{_UP}][{_LOW}]*(?:вич|вн|ұлы|қызы|улы|кызы)[{_LOW}]*"
+# «Қарулы Күштері» (вооружённые силы) — не отчество, хотя оканчивается на «-улы».
+_PATRONYMIC = rf"(?!Қарулы\b)[{_UP}][{_LOW}]*(?:вич|вн|ұлы|қызы|улы|кызы)[{_LOW}]*"
 # Казахский порядок: «Светлана Олеговна Уразованың» — имя, отчество, фамилия.
 _FULL_NAME_RE = re.compile(
     rf"\b{_NAME_WORD}\s+{_NAME_WORD}\s+{_PATRONYMIC}|\b{_NAME_WORD}\s+{_PATRONYMIC}\s+{_NAME_WORD}")
 # «Кудабаева Ж.А.», «Ким И. Р.»
-_SHORT_NAME_RE = re.compile(rf"\b{_NAME_WORD}\s+[{_UP}]\.\s?(?:[{_UP}]\.)?")
+_SHORT_NAME_RE = re.compile(rf"\b(?!Компани\b){_NAME_WORD}\s+[{_UP}]\.\s?(?:[{_UP}]\.)?")  # «… Компани Н.В.» — фирма
+# Заглавными: «СЕЙТЕНОВ ЕРЛАН НАСУРЛАНОВИЧ»
+_CAPS_NAME_RE = re.compile(rf"\b[{_UP}]{{2,}}\s+[{_UP}]{{2,}}\s+[{_UP}]{{2,}}(?:ВИЧ|ВН[АЫЕУ]|ҰЛЫ|ҚЫЗЫ|УЛЫ|КЫЗЫ)\w*")
+# «ИП «Х» в лице руководителя …», «ТОО «Х» представитель …» — дальше до конца идёт ФИО человека.
+_REPRESENTED_RE = re.compile(r"(\b(?:в\s+лице|представител[ья])\s+(?:руководителя\s+|директора\s+)?)(.+)$", re.I)
 
 
 def _initials(text: str) -> str:
@@ -274,6 +283,7 @@ def mask_text(text: str, parties: list[str] = ()) -> str:
             else rf"\b{_stem(words[0])}[{_LOW}]*\s+{words[1][0]}\."
         text = re.sub(full, lambda m: hide(initials), text)
         text = re.sub(short, lambda m: hide(initials), text)
+    text = _CAPS_NAME_RE.sub(lambda m: hide(_initials(m.group(0).title())), text)
     text = _FULL_NAME_RE.sub(lambda m: hide(_initials(m.group(0))), text)
     text = _SHORT_NAME_RE.sub(lambda m: hide(_initials(m.group(0))), text)
     # «… Уразованың.» -> «С. О. У.», а не «С. О. У..»
