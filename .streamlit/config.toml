@@ -1,0 +1,10 @@
+# Окно работает только на этом компьютере, статистика использования Streamlit не отправляется.
+[server]
+address = "localhost"
+port = 8501
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"

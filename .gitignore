@@ -13,3 +13,6 @@ __pycache__/
 
 # Личные заметки
 SHPARGALKA.md
+
+# Настройки Claude Code
+.claude/

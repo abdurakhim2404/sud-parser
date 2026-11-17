@@ -25,7 +25,7 @@ def _pct(part: int, whole: int) -> str:
     return f"{part} из {whole} ({part / whole:.0%})" if whole else "—"
 
 
-def _outcome_rows(rows) -> list[list]:
+def outcome_rows(rows) -> list[list]:
     out = []
     for r in rows:
         other = r.total - sum(r.counts[o] for o in MAIN_OUTCOMES)
@@ -110,7 +110,7 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
            "доли исходов не отражают реальную практику.")
 
     w.title("Исходы по сторонам спора")
-    w.table(["Кто с кем судится", *OUTCOME_HEADER], _outcome_rows(outcome_table(decisions, side_group)))
+    w.table(["Кто с кем судится", *OUTCOME_HEADER], outcome_rows(outcome_table(decisions, side_group)))
 
     counter = [d for d in decisions if d.counter_outcome]
     if counter:
@@ -118,16 +118,16 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
                "исход встречного — в листе «Решения».")
 
     w.title("Исходы по предмету спора")
-    w.table(["Предмет спора", *OUTCOME_HEADER], _outcome_rows(outcome_table(decisions, lambda d: d.topic or "—")))
+    w.table(["Предмет спора", *OUTCOME_HEADER], outcome_rows(outcome_table(decisions, lambda d: d.topic or "—")))
 
     names = court_names(decisions)
     w.title("Исходы по судам")
     w.table(["Суд", *OUTCOME_HEADER],
-            _outcome_rows(outcome_table(decisions, lambda d: names.get(court_key(d), d.court or "—"))))
+            outcome_rows(outcome_table(decisions, lambda d: names.get(court_key(d), d.court or "—"))))
 
     w.title("Порядок рассмотрения")
     w.table(["Порядок", *OUTCOME_HEADER],
-            _outcome_rows(outcome_table(decisions, lambda d: d.procedure or "не определён")))
+            outcome_rows(outcome_table(decisions, lambda d: d.procedure or "не определён")))
 
     w.title("Взысканные суммы (решения, где взыскан основной долг), тенге")
     money = money_stats(decisions)
