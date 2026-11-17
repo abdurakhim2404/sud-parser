@@ -18,7 +18,7 @@ import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from sud_parser.practice.analyze import (  # noqa: E402
-    MAIN_OUTCOMES, PracticeResult, analyze_folder, article_table, court_key, court_names,
+    MAIN_OUTCOMES, PracticeResult, analyze_folder, analyze_folders, article_table, court_key, court_names,
     money_stats, osi_pays_stats, osi_result, outcome_table, side_group,
 )
 from sud_parser.practice.extract import UNKNOWN, display_party  # noqa: E402
@@ -43,6 +43,23 @@ def analyze_uploads(files) -> PracticeResult:
             used.add(name.lower())
             (Path(tmp) / name).write_bytes(f.getvalue())
         return analyze_folder(Path(tmp))
+
+
+def known_folders() -> dict[str, Path]:
+    """Папки с решениями на этом компьютере: результаты сборщика (data/collected/…) и папка sud-decisions
+    рядом с проектом. Подпись — имя папки и число файлов."""
+    roots = [ROOT / "data" / "collected", ROOT.parent / "sud-decisions"]
+    candidates = []
+    for root in roots:
+        if root.is_dir():
+            candidates += [root, *sorted(p for p in root.iterdir() if p.is_dir())]
+    found = {}
+    for folder in candidates:
+        count = sum(1 for p in folder.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED
+                    and not p.name.startswith(("~$", "_")))
+        if count:
+            found[f"{folder.parent.name}/{folder.name} — {count} файлов"] = folder
+    return found
 
 
 def excel_bytes(result: PracticeResult, source: str) -> bytes:
@@ -105,8 +122,21 @@ st.caption("Загрузите решения судов (.docx, .rtf, .txt; н�
            "Программа определит стороны, исход, суммы и статьи законов. Файлы обрабатываются "
            "на этом компьютере и никуда не отправляются.")
 
-source_mode = st.radio("Откуда взять решения", ["Загрузить файлы", "Папка на компьютере"], horizontal=True)
-if source_mode == "Загрузить файлы":
+source_mode = st.radio("Откуда взять решения", ["Готовые папки", "Загрузить файлы", "Папка на компьютере"],
+                       horizontal=True)
+if source_mode == "Готовые папки":
+    known = known_folders()
+    if not known:
+        st.info("Готовых папок нет. Соберите решения сборщиком (python -m sud_parser.collect) "
+                "или выберите другой способ.")
+    labels = list(known)
+    chosen = st.multiselect("Папки с решениями (можно несколько: одно дело из разных папок считается один раз)",
+                            labels, default=labels)
+    if st.button("Разобрать", type="primary", disabled=not chosen):
+        with st.spinner("Разбираю решения…"):
+            st.session_state.result = analyze_folders([known[c] for c in chosen])
+            st.session_state.source = "; ".join(str(known[c]) for c in chosen)
+elif source_mode == "Загрузить файлы":
     uploads = st.file_uploader("Перетащите файлы решений сюда", accept_multiple_files=True,
                                type=[s.lstrip(".") for s in SUPPORTED])
     if st.button("Разобрать", type="primary", disabled=not uploads):

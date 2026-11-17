@@ -31,19 +31,26 @@ class PracticeResult:
 
 
 def analyze_folder(folder: Path) -> PracticeResult:
-    files = list_files(folder)
+    return analyze_folders([folder])
+
+
+def analyze_folders(folders: list[Path]) -> PracticeResult:
+    """Несколько папок как одна выборка. Одно и то же дело из разных папок считается один раз."""
+    many = len(folders) > 1
+    files = [path for folder in folders for path in list_files(folder)]
     parsed: list[Decision] = []
     errors: list[tuple[str, str]] = []
     for path in files:
+        name = f"{path.parent.name}/{path.name}" if many else path.name
         if path.suffix.lower() not in SUPPORTED:
-            errors.append((path.name, "формат не поддерживается (нужен .docx или .txt)"))
+            errors.append((name, "формат не поддерживается (нужен .docx, .rtf или .txt)"))
             continue
         try:
             text = read_text(path)
         except Exception as exc:  # один битый файл не должен останавливать анализ
-            errors.append((path.name, str(exc)))
+            errors.append((name, str(exc)))
             continue
-        parsed.append(parse_decision(text, path.name))
+        parsed.append(parse_decision(text, name))
     result = select_decisions(parsed)
     result.errors = errors
     result.files_total = len(files)

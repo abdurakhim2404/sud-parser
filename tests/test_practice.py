@@ -544,3 +544,16 @@ def test_kazakh_award_to_cooperative_without_paidasyna():
     out = split_amounts(["Жауапкер Анна Тестовадан коммуналдық қызметтерге берешек 181 000 (жүз) теңге "
                          "«Жаңақала» пәтер иелері кооперативіне өндірілсін."], osi_plaintiff=False)
     assert out[TO_OSI].principal == 181_000
+
+
+def test_analyze_folders_counts_case_once(tmp_path):
+    from sud_parser.practice.analyze import analyze_folders
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    (a / "debt.txt").write_text(DEBT, encoding="utf-8")
+    (b / "debt.txt").write_text(DEBT, encoding="utf-8")       # то же дело во второй папке
+    (b / "refusal.txt").write_text(REFUSAL, encoding="utf-8")
+    result = analyze_folders([a, b])
+    assert result.files_total == 3
+    assert len(result.decisions) == 2
+    assert [e.file for e in result.excluded] == ["b/debt.txt"]
