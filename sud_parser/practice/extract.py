@@ -38,7 +38,8 @@ MONTHS = {
     "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
     "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
 }
-CASE_NO_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-[0-9A-Za-zА-Яа-я]{1,3}/\d+)")
+# Номер дела: «7514-25-00-2/27138»; бывает и с обратной косой чертой «7514-25-00-2\4027».
+CASE_NO_RE = re.compile(r"(\d{4}-\d{2}-\d{2}-[0-9A-Za-zА-Яа-я]{1,3}[/\\]\d+)")
 DATE_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s*(?:года?\b|г\.)", re.I)  # «2025 года», «2025год», «2025 г.»
 
 OSI_RE = re.compile(
@@ -55,9 +56,14 @@ ORG_RE = re.compile(
 HEADINGS = (
     "ИСТЕЦ", "ИСТЦЫ", "ОТВЕТЧИК", "ТРЕБОВАНИ", "ТРЕТЬ", "ВСУДЕУЧАСТВОВАЛ", "ОПИСАТЕЛЬН",
     "МОТИВИРОВОЧН", "РЕЗОЛЮТИВН", "РЕШИЛ", "СУДРЕШИЛ", "УСТАНОВИЛ", "ПОСТАНОВИЛ", "ОПРЕДЕЛИЛ",
-    "ЗАЯВИТЕЛ", "ЗАИНТЕРЕСОВАНН", "ПРОКУРОР", "ПРЕДСТАВИТЕЛ",
+    "ЗАЯВИТЕЛ", "ЗАИНТЕРЕСОВАНН", "ПРОКУРОР", "ПРЕДСТАВИТЕЛ", "ЗАЯВЛЕНН", "ИСКОВЫЕТРЕБОВАН",
 )
+# Блок требований истца: «ТРЕБОВАНИЯ ИСТЦА», «ЗАЯВЛЕННОЕ ТРЕБОВАНИЕ», «ИСКОВЫЕ ТРЕБОВАНИЯ».
+# Не «ТРЕБОВАНИЙ НА ПРЕДМЕТ СПОРА» — это вторая строка заголовка «ТРЕТЬИ ЛИЦА, НЕ ЗАЯВЛЯЮЩИЕ …».
+CLAIM_HEADINGS = ("ТРЕБОВАНИЯ", "ТРЕБОВАНИЕ", "ЗАЯВЛЕНН", "ИСКОВЫЕТРЕБОВАН")
 OPERATIVE = ("РЕШИЛ", "СУДРЕШИЛ", "ПОСТАНОВИЛ", "ОПРЕДЕЛИЛ")
+OPERATIVE_INLINE_RE = re.compile(r"(?<![А-ЯЁ])Р\s?Е\s?Ш\s?И\s?Л\s*:")
+COUNTER_RE = re.compile(r"встречн", re.I)
 
 # Строки резолютивной части, которые разъясняют порядок обжалования, а не решают спор.
 BOILERPLATE_RE = re.compile(
@@ -126,7 +132,8 @@ class Decision:
     third_parties: list[str] = field(default_factory=list)
     claim: str = ""
     topic: str = ""
-    outcome: str = UNKNOWN
+    outcome: str = UNKNOWN          # исход основного иска
+    counter_outcome: str = ""       # исход встречного иска, если он был
     outcome_text: str = ""
     amounts: Amounts = field(default_factory=Amounts)        # взыскано в пользу ОСИ
     osi_pays: Amounts = field(default_factory=Amounts)       # взыскано с ОСИ
@@ -226,7 +233,13 @@ def _sections(lines: list[str]) -> tuple[list[str], list[tuple[str, list[str]]]]
     blocks: list[tuple[str, list[str]]] = []
     for line in lines:
         h = _heading(line)
-        if h:
+        if h and h[0].startswith("ТРЕБОВАНИЙ") and blocks and blocks[-1][0].startswith("ТРЕТЬ") \
+                and not blocks[-1][1]:
+            # «ТРЕТЬИ ЛИЦА, НЕ ЗАЯВЛЯЮЩИЕ САМОСТОЯТЕЛЬНЫХ» / «ТРЕБОВАНИЙ НА ПРЕДМЕТ СПОРА:» —
+            # один заголовок на двух строках.
+            if h[1]:
+                blocks[-1][1].append(h[1])
+        elif h:
             blocks.append((h[0], [h[1]] if h[1] else []))
         elif blocks:
             blocks[-1][1].append(line)
@@ -377,6 +390,17 @@ def _resolve_law(window: str, aliases: dict[str, str], bare_law: str | None) -> 
     return None
 
 
+def _nearest_code_before(text: str, pos: int, reach: int = 700) -> str | None:
+    """Последний кодекс, явно названный в пределах `reach` символов перед позицией."""
+    chunk = text[max(0, pos - reach):pos]
+    best, best_at = None, -1
+    for name, rx in CODES:
+        for cm in rx.finditer(chunk):
+            if cm.start() > best_at:
+                best, best_at = name, cm.start()
+    return best
+
+
 def extract_citations(text: str) -> tuple[list[Citation], list[str]]:
     """Статьи законов, на которые ссылается решение, и фрагменты ссылок, закон которых не определён."""
     aliases: dict[str, str] = {}
@@ -397,6 +421,10 @@ def extract_citations(text: str) -> tuple[list[Citation], list[str]]:
             chained = CHAINED_RE.match(window)
             if chained:
                 law = _resolve_law(window[chained.end():], aliases, bare_law)
+        if law is None and re.match(r"настоящ\w+\s+[Кк]одекс", window):
+            # «…указанных в статье 7 настоящего Кодекса» — это цитата из кодекса, названного
+            # чуть раньше: «Согласно статье 271 Гражданского кодекса … статье 7 настоящего Кодекса».
+            law = _nearest_code_before(text, m.start())
         if law is None:
             unresolved.append(_norm(text[m.start(): m.end() + 60]))
             continue
@@ -408,7 +436,8 @@ def extract_citations(text: str) -> tuple[list[Citation], list[str]]:
 # --- исход и суммы ---------------------------------------------------------------------------
 
 def classify_outcome(operative: str) -> str:
-    op = operative.lower()
+    # «удовлеторить» — опечатка, встречается в решениях.
+    op = re.sub(r"\bудовлет\w{0,2}рить\b", "удовлетворить", operative.lower())
     partial = re.search(r"удовлетворить\s+частично|частично\s+удовлетворить", op)
     satisfy = re.search(r"\bудовлетворить\b", op)
     rest_refused = re.search(r"остальной\s+части[^.]*?отказать|отказать[^.]*?остальной\s+части", op)
@@ -454,7 +483,8 @@ def _money_kind(context: str) -> str:
 
 # «…, всего 20 600 тенге» — это сумма уже перечисленного, второй раз её не считаем.
 TOTAL_RE = re.compile(r"\b(?:всего|итого|в\s+общей\s+сумме|на\s+общую\s+сумму)\b", re.I)
-PAYER_PAYEE_RE = re.compile(r"\bвзыскать\b(?P<payer>.*?)\bв\s+пользу\b(?P<payee>.*)", re.I)
+# Без \b перед «в»: в решениях бывает «…Ивановныв пользу» — пробел пропущен.
+PAYER_PAYEE_RE = re.compile(r"\bвзыскать\b(?P<payer>.*?)в\s+пользу\b(?P<payee>.*)", re.I)
 # Где кончается название получателя и начинается «за что»: «… в пользу ОСИ «Х» задолженность …».
 PAYEE_END_RE = re.compile(
     r"\s(?:сумм|задолж|расход|судебн|государствен|госпошлин|оплат|возврат|нотариал|почтов|неустойк|"
@@ -474,8 +504,18 @@ def _award_lines(operative_lines: list[str]):
         yield _norm(clean)
 
 
-def _line_amounts(clean: str) -> Amounts:
+EACH_RE = re.compile(r"\bкаждо(?:му|го|й)\b", re.I)
+PAYER_EACH_RE = re.compile(r"\bс\s+каждого\b", re.I)
+
+
+def _line_amounts(clean: str) -> tuple[Amounts, bool]:
+    """Суммы строки и признак «после общей суммы идёт разбивка по 125 000 с каждого».
+
+    «… 500 000 тенге, по 125 000 тенге с каждого» — 125 000 уже входит в 500 000, второй раз не считаем.
+    """
     amounts = Amounts()
+    seen_plain = False   # была сумма без «по»: это общая сумма
+    breakdown = False
     for fragment in re.split(r";|,\s+(?=[^\d\s])", clean):
         prev_end = 0
         for m in MONEY_RE.finditer(fragment):
@@ -483,19 +523,36 @@ def _line_amounts(clean: str) -> Amounts:
             prev_end = m.end()
             if TOTAL_RE.search(context):
                 continue
-            amounts.add(_money_kind(context), _parse_money(m.group(1), m.group(2)))
-    return amounts
+            per_person = re.search(r"\bпо\s*$", context, re.I) and EACH_RE.search(fragment[m.end():m.end() + 40])
+            if per_person and seen_plain:
+                breakdown = True
+                continue
+            if not per_person:
+                seen_plain = True
+            value = _parse_money(m.group(1), m.group(2))
+            # «671 874 тенге 18 тиын» — тиыны после слова «тенге»
+            tiyn = re.match(r"\s*(\d{1,2})\s*тиын", fragment[m.end():], re.I)
+            if tiyn and not m.group(2) and re.search(r"тенге|тг", m.group(0), re.I):
+                value = round(value + int(tiyn.group(1)) / 100, 2)
+            amounts.add(_money_kind(context), value)
+    return amounts, breakdown
+
+
+def _parties_count(segment: str) -> int:
+    return max(1, len(split_parties([re.sub(r"\s+и\s+", ", ", segment)])))
 
 
 def _each_multiplier(clean: str) -> int:
-    """«… в пользу А, Б, В … по 3 692 тенге каждому» — сумма на каждого получателя."""
-    if not re.search(r"\bкаждо(?:му|го|й)\b", clean, re.I):
+    """«по 3 692 тенге каждому» — на каждого получателя; «по 125 000 с каждого» — с каждого плательщика."""
+    if not EACH_RE.search(clean):
         return 1
     m = PAYER_PAYEE_RE.search(clean)
     if not m:
         return 1
-    payee = PAYEE_END_RE.split(m.group("payee"), maxsplit=1)[0]
-    return max(1, len(split_parties([re.sub(r"\s+и\s+", ", ", payee)])))
+    if PAYER_EACH_RE.search(clean):
+        payer = re.sub(r"^\s*(?:в\s+\w+\s+порядке\s+)?с\s+", "", m.group("payer"), flags=re.I)
+        return _parties_count(payer)
+    return _parties_count(PAYEE_END_RE.split(m.group("payee"), maxsplit=1)[0])
 
 
 def award_direction(clean: str, osi_plaintiff: bool) -> str:
@@ -506,6 +563,8 @@ def award_direction(clean: str, osi_plaintiff: bool) -> str:
         payee = PAYEE_END_RE.split(m.group("payee"), maxsplit=1)[0]
     else:  # «Взыскать с Иванова задолженность …» — получатель не назван
         payer, payee = clean, ""
+    if OSI_RE.search(payee) and OSI_RE.search(payer):
+        return OTHER  # ОСИ и КСК (или союз кооперативов) с обеих сторон: чьё это «ОСИ» — неясно
     if OSI_RE.search(payee):
         return TO_OSI
     if OSI_RE.search(payer):
@@ -519,20 +578,41 @@ def extract_amounts(operative_lines: list[str]) -> Amounts:
     """Все суммы из строк «Взыскать ...» резолютивной части, без разделения по сторонам."""
     total = Amounts()
     for clean in _award_lines(operative_lines):
-        k = _each_multiplier(clean)
-        for kind, value in vars(_line_amounts(clean)).items():
+        line, breakdown = _line_amounts(clean)
+        k = 1 if breakdown else _each_multiplier(clean)
+        for kind, value in vars(line).items():
             total.add(kind, value * k)
     return total
+
+
+def _osi_share(clean: str) -> float:
+    """Доля ОСИ, если деньги взысканы с нескольких плательщиков «в долевом порядке, в равных долях».
+
+    При солидарном взыскании (и когда доли не названы) каждый отвечает за всю сумму — доля 1.
+    """
+    if not re.search(r"долев|равных\s+дол", clean, re.I):
+        return 1.0
+    m = PAYER_PAYEE_RE.search(clean)
+    if not m:
+        return 1.0
+    payer = re.sub(r"^\s*(?:в\s+\w+\s+порядке\s+)?с\s+", "", m.group("payer"), flags=re.I)
+    payers = split_parties([re.sub(r"\s+и\s+", ", ", payer)])
+    return 1.0 / len(payers) if len(payers) > 1 else 1.0
 
 
 def split_amounts(operative_lines: list[str], osi_plaintiff: bool) -> dict[str, Amounts]:
     """Суммы по направлениям: в пользу ОСИ, с ОСИ, между другими участниками."""
     out = {TO_OSI: Amounts(), FROM_OSI: Amounts(), OTHER: Amounts()}
     for clean in _award_lines(operative_lines):
-        target = out[award_direction(clean, osi_plaintiff)]
-        k = _each_multiplier(clean)
-        for kind, value in vars(_line_amounts(clean)).items():
-            target.add(kind, value * k)
+        direction = award_direction(clean, osi_plaintiff)
+        line, breakdown = _line_amounts(clean)
+        k = 1 if breakdown else _each_multiplier(clean)
+        share = _osi_share(clean) if direction == FROM_OSI else 1.0
+        for kind, value in vars(line).items():
+            value *= k
+            out[direction].add(kind, round(value * share, 2))
+            if share < 1:  # остальное платят другие ответчики
+                out[OTHER].add(kind, round(value * (1 - share), 2))
     return out
 
 
@@ -562,8 +642,12 @@ def _doc_type(lines: list[str]) -> str:
     return "не определён"
 
 
+# Латинские буквы, похожие на русские: «19 cентября» (латинская «c») встречается в решениях.
+_LATIN_LOOKALIKES = str.maketrans("aceopxyACEOPXHKMBT", "асеорхуАСЕОРХНКМВТ")
+
+
 def _parse_date(text: str) -> date | None:
-    m = DATE_RE.search(text)
+    m = DATE_RE.search(text.translate(_LATIN_LOOKALIKES))
     if not m:
         return None
     try:
@@ -617,7 +701,17 @@ def _judge(lines: list[str], header_text: str) -> str:
 
 def parse_decision(text: str, file: str = "") -> Decision:
     lines = [l.rstrip() for l in text.replace("\r", "").split("\n")]
-    nonempty = [l for l in lines if l.strip()]
+    nonempty = []
+    for l in lines:
+        if not l.strip():
+            continue
+        # «Руководствуясь статьями 223-226 ГПК, суд РЕШИЛ: Иск … удовлетворить» — заголовок посреди строки.
+        op = OPERATIVE_INLINE_RE.search(l)
+        if op and op.start() > 0 and l[:op.start()].strip():
+            nonempty.append(l[:op.start()])
+            nonempty.append(l[op.start():])
+        else:
+            nonempty.append(l)
     d = Decision(file=file, text_length=len(text))
     d.doc_type = _doc_type(nonempty)
 
@@ -627,8 +721,8 @@ def parse_decision(text: str, file: str = "") -> Decision:
     # Номер дела и дата: строка с номером обычно содержит и дату (в шапке или в таблице внизу).
     m = CASE_NO_RE.search(text)
     if m:
-        d.case_number = m.group(1)
-        line = next(l for l in nonempty if d.case_number in l)
+        line = next(l for l in nonempty if m.group(1) in l)
+        d.case_number = m.group(1).replace("\\", "/")
         d.date = _parse_date(line)
         city = re.search(r"(?:город|г\.)\s*([А-ЯЁӘІҢҒҮҰҚӨҺ][а-яёәіңғүұқөһ\-]+)", line)
         d.city = city.group(1) if city else ""
@@ -646,7 +740,7 @@ def parse_decision(text: str, file: str = "") -> Decision:
     d.plaintiffs = split_parties(_block(blocks, "ИСТЕЦ", "ИСТЦЫ", "ЗАЯВИТЕЛ") or [])
     d.defendants = split_parties(_block(blocks, "ОТВЕТЧИК") or [])
     d.third_parties = split_parties(_block(blocks, "ТРЕТЬ") or [])
-    d.claim = _norm(" ".join(_block(blocks, "ТРЕБОВАНИ") or []))
+    d.claim = _norm(" ".join(_block(blocks, *CLAIM_HEADINGS) or []))
 
     operative: list[str] = []
     for key, block_lines in blocks:
@@ -654,14 +748,20 @@ def parse_decision(text: str, file: str = "") -> Decision:
             operative = []
             for line in block_lines:
                 stripped = line.strip()
-                if re.match(r"Судья\b", stripped):
+                if re.match(r"(?:Председательствующий\s+)?[Сс]удья\b", stripped):
                     break
                 if not BOILERPLATE_RE.match(stripped):
                     operative.append(stripped)
             break
-    operative_text = _norm(" ".join(operative))
+    # Встречный иск решается в той же резолютивной части. Исход дела — это исход основного иска,
+    # исход встречного храним отдельно: «В иске ОСИ отказать. Встречный иск ТОО удовлетворить» —
+    # для ОСИ это проигрыш, хотя слово «удовлетворить» в тексте есть.
+    main_ops = [l for l in operative if not COUNTER_RE.search(l)]
+    counter_ops = [l for l in operative if COUNTER_RE.search(l)]
     if operative:
-        d.outcome = classify_outcome(operative_text)
+        d.outcome = classify_outcome(_norm(" ".join(main_ops)))
+        if counter_ops:
+            d.counter_outcome = classify_outcome(_norm(" ".join(counter_ops)))
         d.outcome_text = _norm(operative[0])
         split = split_amounts(operative, osi_plaintiff="истец" in d.osi_role)
         d.amounts, d.osi_pays, d.other_awards = split[TO_OSI], split[FROM_OSI], split[OTHER]

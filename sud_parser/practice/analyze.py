@@ -78,7 +78,8 @@ def side_group(d: Decision) -> str:
         return f"ОСИ — ответчик, истец: {d.opponent or 'не определено'}"
     if d.osi_role == "нет":
         return "ОСИ не сторона спора"
-    return "ОСИ с обеих сторон"
+    # Например, новое ОСИ требует документы у прежнего КСК: «выиграло ли ОСИ» здесь не имеет смысла.
+    return "ОСИ (КСК) с обеих сторон"
 
 
 def osi_won(d: Decision) -> bool | None:

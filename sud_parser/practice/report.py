@@ -112,6 +112,11 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
     w.title("Исходы по сторонам спора")
     w.table(["Кто с кем судится", *OUTCOME_HEADER], _outcome_rows(outcome_table(decisions, side_group)))
 
+    counter = [d for d in decisions if d.counter_outcome]
+    if counter:
+        w.note(f"Встречный иск был в {len(counter)} решениях. Во всех таблицах исход — это исход основного иска; "
+               "исход встречного — в листе «Решения».")
+
     w.title("Исходы по предмету спора")
     w.table(["Предмет спора", *OUTCOME_HEADER], _outcome_rows(outcome_table(decisions, lambda d: d.topic or "—")))
 
@@ -163,7 +168,7 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
 
     _table_sheet(wb, "Решения", [
         "Номер дела", "Дата", "Суд", "Судья", "Порядок", "Истец", "Ответчики", "Роль ОСИ", "Против кого",
-        "Предмет спора", "Требования истца", "Исход", "Резолютивная часть (начало)",
+        "Предмет спора", "Требования истца", "Исход (основной иск)", "Встречный иск: исход", "Резолютивная часть (начало)",
         "В пользу ОСИ: долг, ₸", "В пользу ОСИ: неустойка, ₸", "В пользу ОСИ: госпошлина, ₸",
         "В пользу ОСИ: представитель, ₸", "В пользу ОСИ: прочие расходы, ₸",
         "С ОСИ: всего, ₸", "Между другими участниками: всего, ₸",
@@ -173,7 +178,7 @@ def write_practice_report(result: PracticeResult, out_dir: str | Path = "reports
             d.case_number, d.date, d.court, d.judge, d.procedure,
             "; ".join(display_party(p) for p in d.plaintiffs),
             "; ".join(display_party(p) for p in d.defendants),
-            d.osi_role, d.opponent, d.topic, d.claim[:300], d.outcome, d.outcome_text[:300],
+            d.osi_role, d.opponent, d.topic, d.claim[:300], d.outcome, d.counter_outcome or "—", d.outcome_text[:300],
             d.amounts.principal, d.amounts.penalty, d.amounts.state_fee, d.amounts.lawyer, d.amounts.other_costs,
             d.osi_pays.total, d.other_awards.total,
             d.obligations,

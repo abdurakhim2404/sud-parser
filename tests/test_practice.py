@@ -321,3 +321,115 @@ def test_citation_variants():
     assert ("Закон «О жилищных отношениях»", "50") in got
     assert {("ГПК", "48"), ("ГПК", "169"), ("ГПК", "196")} <= got
     assert unresolved == []
+
+
+RTF_SAMPLE = (
+    rb"{\rtf1\ansi\ansicpg1251\deff0{\fonttbl{\f0\fcharset204 Times New Roman;}{\f1\fcharset0 Arial;}}"
+    rb"{\colortbl;\red0\green0\blue0;}{\*\generator Msftedit;}"
+    rb"\pard\qc\f0 \'d0\'c5\'d8\'c5\'cd\'c8\'c5\par"
+    rb"\'c8\'cc\'c5\'cd\'c5\'cc \'d0\'c5\'d1\'cf\'d3\'c1\'cb\'c8\'ca\'c8 \'ca\'c0\'c7\'c0\'d5\'d1\'d2\'c0\'cd\par"
+    rb"\uc1\u1076?\u1077?\u1083?\u1086? \'b9 7119-25-00-2/7227\par"
+    rb"\trowd\intbl \'c8\'d1\'d2\'c5\'d6\cell \'ce\'d1\'c8 \'ab\'c4\'ee\'ec\'bb\cell\row"
+    rb"\f1 Total\tab end\par}"
+)
+
+
+def test_rtf_reader(tmp_path):
+    from sud_parser.practice.reader import read_text, rtf_to_text
+    text = rtf_to_text(RTF_SAMPLE)
+    lines = [l for l in text.splitlines() if l.strip()]
+    assert lines[0] == "РЕШЕНИЕ"
+    assert lines[1] == "ИМЕНЕМ РЕСПУБЛИКИ КАЗАХСТАН"
+    assert lines[2] == "дело № 7119-25-00-2/7227"
+    assert lines[3] == "ИСТЕЦ | ОСИ «Дом»"
+    assert lines[4] == "Total\tend"
+    assert "Times" not in text and "Msftedit" not in text
+    # .doc, внутри которого RTF, читается так же
+    p = tmp_path / "решение.doc"
+    p.write_bytes(RTF_SAMPLE)
+    assert read_text(p).splitlines()[0] == "РЕШЕНИЕ"
+
+
+def test_split_amounts_equal_shares():
+    from sud_parser.practice.extract import FROM_OSI, OTHER, split_amounts
+    lines = [
+        "Взыскать с объединения собственников имущества «Талисман», Иванова И.И., Петрова П.П., "
+        "Сидорова С.С., Козлова К.К. в пользу Смирновой С.С. расходы по оплате услуг представителя "
+        "в размере 200 000 (двести тысяч) тенге в долевом порядке, в равных долях.",
+        "Взыскать солидарно с ОСИ «Дом» и Иванова И.И. в пользу Петрова П.П. госпошлину 1 000 тенге.",
+    ]
+    out = split_amounts(lines, osi_plaintiff=False)
+    assert out[FROM_OSI].lawyer == 40_000      # 200 000 / 5 плательщиков
+    assert out[OTHER].lawyer == 160_000
+    assert out[FROM_OSI].state_fee == 1_000    # солидарно: ОСИ отвечает за всю сумму
+
+
+def test_this_code_refers_to_code_quoted_before():
+    text = ("Согласно статье 271 Гражданского кодекса Республики Казахстан обязательства возникают из "
+            "оснований, указанных в статье 7 настоящего Кодекса. Пунктом 5 статьи 42-1 установлено, что …")
+    cits, unresolved = extract_citations(text)
+    assert Citation("ГК", "7") in cits
+    assert len(unresolved) == 1 and "42-1" in unresolved[0]   # закон не назван — не угадываем
+
+
+COUNTER_TEXT = r"""РЕШЕНИЕ
+ИМЕНЕМ РЕСПУБЛИКИ КАЗАХСТАН
+26 июня 2025 года		№ 7514-25-00-2\4027         город Алматы
+Бостандыкский районный суд города Алматы в составе:
+председательствующего, судьи Тестов Т.Т.
+ИСТЕЦ:
+Тестова Анна Борисовна
+ОТВЕТЧИК:
+объединение собственников имущества «Тест»
+ТРЕБОВАНИЯ ИСТЦА:
+О признании недействительным решения собрания
+ИСТЕЦ ПО ВСТРЕЧНОМУ ИСКУ:
+объединение собственников имущества «Тест»
+РЕЗОЛЮТИВНАЯ ЧАСТЬ
+Руководствуясь статьями 223-226 ГПК, суд РЕШИЛ: В удовлетворении иска Тестовой А.Б. к ОСИ «Тест» отказать.
+Встречный иск объединения собственников имущества «Тест» - удовлеторить частично.
+Взыскать с Тестовой А.Б. в пользу объединения собственников имущества «Тест» задолженность в размере 36 967 тенге.
+В остальной части встречного иска отказать.
+Председательствующий судья Тестов Т.Т.
+"""
+
+
+def test_counterclaim_inline_operative_and_backslash_number():
+    d = parse_decision(COUNTER_TEXT, "x.docx")
+    assert d.case_number == "7514-25-00-2/4027"
+    assert d.outcome == REFUSED                      # основной иск жителя — отказ, ОСИ выиграло
+    assert d.counter_outcome == PARTIAL              # встречный иск ОСИ — частично («удовлеторить» — опечатка)
+    assert d.amounts.principal == 36_967
+    assert d.osi_role == "ответчик"
+    assert "резолютивная часть («РЕШИЛ:») не найдена" not in d.warnings
+
+
+def test_header_variants():
+    text = COUNTER_TEXT.replace("26 июня", "19 c\u0435нтября").replace(
+        "ТРЕБОВАНИЯ ИСТЦА:", "ТРЕТЬИ ЛИЦА, НЕ ЗАЯВЛЯЮЩИЕ САМОСТОЯТЕЛЬНЫХ\nТРЕБОВАНИЙ НА ПРЕДМЕТ СПОРА:\n"
+        "ГУ «Управление жилья»\nЗАЯВЛЕННОЕ ТРЕБОВАНИЕ:")
+    d = parse_decision(text, "x.docx")
+    assert str(d.date) == "2025-09-19"                       # латинская «c» в «cентября»
+    assert d.claim.startswith("О признании недействительным")
+    assert d.third_parties == ["ГУ «Управление жилья»"]
+
+
+def test_breakdown_per_payer_not_double_counted():
+    from sud_parser.practice.extract import TO_OSI, split_amounts
+    total_then_each = ["Взыскать с Иванова И.И., Петрова П.П., Сидорова С.С., Козлова К.К. в пользу ОСИ «Дом» "
+                       "представительские расходы в размере 500 000 (пятьсот тысяч) тенге, по 125 000 (сто двадцать "
+                       "пять тысяч) тенге с каждого."]
+    assert split_amounts(total_then_each, osi_plaintiff=False)[TO_OSI].lawyer == 500_000
+    only_each = ["Взыскать с Иванова И.И., Петрова П.П. в пользу ОСИ «Дом» расходы на представителя "
+                 "по 100 000 тенге с каждого."]
+    assert split_amounts(only_each, osi_plaintiff=False)[TO_OSI].lawyer == 200_000
+
+
+def test_tiyn_after_tenge_and_osi_on_both_sides():
+    from sud_parser.practice.extract import OTHER, TO_OSI, split_amounts
+    out = split_amounts(["Взыскать с Иванова И.И. в пользу ОСИ «Дом» задолженность в размере 671 874 "
+                         "(шестьсот семьдесят одна тысяча) тенге 18 тиын."], osi_plaintiff=True)
+    assert out[TO_OSI].principal == 671_874.18
+    out = split_amounts(["Взыскать с кооператива собственников имущества «Акбас» в пользу объединения "
+                         "собственников имущества «Центр» расходы по госпошлине 1 966 тенге."], osi_plaintiff=True)
+    assert out[OTHER].state_fee == 1_966 and out[TO_OSI].total == 0
