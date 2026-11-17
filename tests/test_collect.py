@@ -15,6 +15,14 @@ def test_file_names_have_no_personal_names():
     assert file_name("7517-24-00-2/45552", 2, "Иванова - ОСИ Звезда - решение.DOCX") == "7517-24-00-2_45552_2.docx"
 
 
+def test_list_row_has_no_parties():
+    from sud_parser.collect import list_row
+    cells = ["7142-25-00-2/1\n12.03.2025\nГражданские дела", "Иванов И.И. против ОСИ «Дом»",
+             "Межрайонный суд", "Удовлетворено", "СПОРЫ, ВОЗНИКАЮЩИЕ\nИЗ ЖИЛИЩНЫХ"]
+    assert list_row(cells, 3) == {"case_number": "7142-25-00-2/1", "date": "12.03.2025", "court": "Межрайонный суд",
+                                  "result": "Удовлетворено", "category": "СПОРЫ, ВОЗНИКАЮЩИЕ ИЗ ЖИЛИЩНЫХ", "page": 3}
+
+
 def test_manifest_resumes(tmp_path):
     m = Manifest(tmp_path)
     m.add(Row("1/1", "удовлетворено", "Жилищные"), 1, "ok", ["1_1_1.docx"])

@@ -94,7 +94,9 @@ class Manifest:
 def search_body(args) -> dict:
     """Запрос в том виде, как его задаёт форма портала: сохраняется рядом с файлами, чтобы выборку можно было повторить."""
     return {"тип": args.case_type, "год": args.year, "инстанция": "первая", "слова": args.keywords,
-            "область": args.region or "все", "результат": args.result or "все", "лимит": args.limit}
+            "область": args.region or "все", "результат": args.result or "все",
+            "категория": getattr(args, "category", "") or "все",
+            "только список": getattr(args, "list_only", False), "лимит": args.limit}
 
 
 # --- работа со страницей портала -------------------------------------------------------------
@@ -115,6 +117,10 @@ SET_SELECT_JS = """([label, value]) => {
 
 ROWS_JS = """() => [...document.querySelectorAll('tbody tr')].map(tr =>
   [...tr.children].map(td => td.innerText.trim()))"""
+
+
+class PortalStuck(RuntimeError):
+    """Портал показал ошибку вместо списка: нужно искать заново."""
 
 
 class Portal:
@@ -143,6 +149,23 @@ class Portal:
         self.page.locator("a[href='/court-acts']").first.click()
         self.page.locator("input[name=searchText]").wait_for(timeout=30_000)
 
+    def debug_snapshot(self, name: str) -> None:
+        """Снимок экрана и текст страницы при сбое — чтобы понять, что показал портал (в data/, не в git)."""
+        folder = Path("data/collected/_debug")
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = f"{datetime.now():%H-%M-%S}_{name}"
+        try:
+            self.page.screenshot(path=str(folder / f"{stamp}.png"), full_page=True)
+            (folder / f"{stamp}.html").write_text(self.page.content(), encoding="utf-8")
+        except Exception:
+            pass
+
+    def open_bank_again(self) -> None:
+        """Начать поиск заново без перезагрузки страницы: перезагрузка сбрасывает вход по ЭЦП."""
+        self.page.locator("a[href='/cabinet']").first.click()
+        time.sleep(2)
+        self.open_bank()
+
     def set_select(self, label: str, value: str, timeout: float = 20) -> None:
         # варианты списков портал подгружает отдельно: пока их нет, ждём
         deadline = time.time() + timeout
@@ -155,6 +178,28 @@ class Portal:
             time.sleep(0.5)
         time.sleep(0.8)  # следующие поля (категория, суд) подгружаются после выбора
 
+    def select_category(self, category: str) -> None:
+        """«Категория дела» — всплывающее окно с поиском среди ~300 категорий, а не обычный список.
+        Берём вариант, совпадающий целиком, иначе первый, где встречается текст."""
+        self.page.locator("form label", has_text="Категория дела").locator("xpath=..").locator("button").first.click()
+        search = self.page.locator("[data-radix-popper-content-wrapper] input[placeholder='Поиск']")
+        search.wait_for(timeout=10_000)
+        search.fill(category)
+        time.sleep(1)
+        options = self.page.locator("[data-radix-popper-content-wrapper] [cmdk-item]")
+        texts = [t.strip() for t in options.all_inner_texts()]
+        want = " ".join(category.split()).lower()
+        index = next((i for i, t in enumerate(texts) if " ".join(t.split()).lower() == want), None)
+        if index is None:
+            index = next((i for i, t in enumerate(texts) if want in t.lower()), None)
+        if index is None:
+            raise ValueError(f"нет категории «{category}» на портале")
+        options.nth(index).click()
+        time.sleep(0.8)
+        if self.page.locator("[data-radix-popper-content-wrapper]").count():
+            self.page.keyboard.press("Escape")  # если окно позволяет выбрать несколько, закрываем его
+        self.log(f"Категория: {texts[index]}")
+
     def search(self, args) -> None:
         self.set_select("Тип производства", args.case_type)
         self.set_select("Учетный год", str(args.year))
@@ -162,9 +207,12 @@ class Portal:
         if first.get_attribute("aria-checked") != "true":
             first.click()
         self.page.locator("input[name=searchText]").fill(args.keywords)
-        if args.region or args.result:
+        category = getattr(args, "category", "")
+        if args.region or args.result or category:
             self.button("Расширенный поиск").click()
             time.sleep(1)
+            if category:
+                self.select_category(category)
             if args.region:
                 self.set_select("Область", args.region)
             if args.result:
@@ -228,14 +276,25 @@ class Portal:
         nav = self.page.locator("nav[aria-label=pagination] li button")
         if not nav.count():
             return False
-        for _ in range(3):
-            nav.last.click()
+        for attempt in range(5):
+            try:
+                nav.last.click(timeout=15_000)
+            except Exception as exc:  # листалка пропала: портал показал ошибку вместо списка
+                self.debug_snapshot("no-pager")
+                raise PortalStuck(str(exc).splitlines()[0][:120]) from exc
             deadline = time.time() + self.page_wait
             while time.time() < deadline:
-                rows = self.rows()
+                try:
+                    rows = self.rows()
+                except TimeoutError:  # портал перегружен и не отдал список
+                    break
                 if rows and rows[0].case_number != previous_first:
                     return True
                 time.sleep(1)
+            if attempt >= 2:
+                wait = self.pause * 10 * (attempt - 1)
+                self.log(f"  страница не открылась, жду {wait:.0f} с")
+                time.sleep(wait)
         return False
 
 
@@ -264,7 +323,10 @@ def collect(args, log=say) -> int:
             portal.open_bank()
             portal.search(args)
             log(f"Портал нашёл дел: {portal.total()}")
-            walk_results(portal, manifest, out, args)
+            if getattr(args, "list_only", False):
+                list_results(portal, out, args)
+            else:
+                walk_results(portal, manifest, out, args)
         except KeyboardInterrupt:
             log("Остановлено. Повторный запуск продолжит с этого места.")
         except (RuntimeError, TimeoutError, ValueError) as exc:
@@ -274,6 +336,64 @@ def collect(args, log=say) -> int:
     log(f"Готово: дел с решениями {manifest.saved}. Папка: {out.resolve()}")
     log(f"Анализ: python -m sud_parser.practice --dir \"{out.resolve()}\"")
     return 0
+
+
+LIST_FILE = "_list.csv"
+LIST_FIELDS = ["case_number", "date", "court", "result", "category", "page"]
+DATE_RE = re.compile(r"\d{2}\.\d{2}\.\d{4}")
+
+
+def list_row(cells: list[str], page: int) -> dict:
+    """Строка выдачи без сторон процесса (там ФИО): номер, дата, суд, результат, категория."""
+    first = cells[0] if cells else ""
+    date = DATE_RE.search(first)
+    return {"case_number": case_number_of(first), "date": date.group(0) if date else "",
+            "court": cells[2].strip() if len(cells) > 2 else "",
+            "result": cells[3].strip() if len(cells) > 3 else "",
+            "category": " ".join(cells[4].split()) if len(cells) > 4 else "", "page": page}
+
+
+def list_results(portal: Portal, out: Path, args) -> list[dict]:
+    """Только список дел выдачи, без открытия дел и скачивания: быстро и бережно к порталу."""
+    rows: dict[str, dict] = {}
+    page_no = 1
+
+    def save() -> None:  # после каждой страницы: если портал оборвёт, собранное не пропадёт
+        with (out / LIST_FILE).open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=LIST_FIELDS)
+            w.writeheader()
+            w.writerows(rows.values())
+
+    recoveries = 0
+    while page_no <= args.max_pages:
+        try:
+            cells = portal.wait_rows(timeout=60)
+            for c in cells:
+                r = list_row(c, page_no)
+                rows.setdefault(r["case_number"], r)
+            save()
+            portal.log(f"Страница {page_no}: всего в списке {len(rows)}")
+            if not portal.next_page(case_number_of(cells[0][0]) if cells else ""):
+                break
+            page_no += 1
+            time.sleep(args.pause / 2)
+        except (PortalStuck, TimeoutError) as exc:
+            # Портал завис: ждём, ищем заново и долистываем до нужной страницы.
+            recoveries += 1
+            if recoveries > 8:
+                raise
+            wait = 30 * recoveries
+            portal.log(f"  портал завис на странице {page_no} ({exc}); жду {wait} с и ищу заново")
+            time.sleep(wait)
+            portal.open_bank_again()
+            portal.search(args)
+            for _ in range(page_no - 1):
+                first = portal.rows()[0].case_number
+                if not portal.next_page(first):
+                    break
+                time.sleep(args.pause / 2)
+    portal.log(f"Список: {len(rows)} дел -> {out / LIST_FILE}")
+    return list(rows.values())
 
 
 def walk_results(portal: Portal, manifest: Manifest, out: Path, args) -> None:
@@ -343,6 +463,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--case-type", default="CIVIL", help="CIVIL (гражданские), APPK (административные) и т. п.")
     p.add_argument("--region", default="", help="область как на портале, например «город Астана»")
     p.add_argument("--result", default="", help="результат рассмотрения как на портале")
+    p.add_argument("--category", default="", help="категория дела как на портале (можно часть названия)")
+    p.add_argument("--list-only", action="store_true",
+                   help="только список дел выдачи (_list.csv), без скачивания решений")
     p.add_argument("--limit", type=int, default=50, help="сколько дел с решениями скачать")
     p.add_argument("--max-pages", type=int, default=200)
     p.add_argument("--pause", type=float, default=4.0, help="пауза между делами, секунд")
