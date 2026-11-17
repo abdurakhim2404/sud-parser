@@ -143,10 +143,16 @@ class Portal:
         self.page.locator("a[href='/court-acts']").first.click()
         self.page.locator("input[name=searchText]").wait_for(timeout=30_000)
 
-    def set_select(self, label: str, value: str) -> None:
-        res = self.page.evaluate(SET_SELECT_JS, [label, value])
-        if res != "ok":
-            raise ValueError(res)
+    def set_select(self, label: str, value: str, timeout: float = 20) -> None:
+        # варианты списков портал подгружает отдельно: пока их нет, ждём
+        deadline = time.time() + timeout
+        while True:
+            res = self.page.evaluate(SET_SELECT_JS, [label, value])
+            if res == "ok":
+                break
+            if time.time() > deadline:
+                raise ValueError(res)
+            time.sleep(0.5)
         time.sleep(0.8)  # следующие поля (категория, суд) подгружаются после выбора
 
     def search(self, args) -> None:
