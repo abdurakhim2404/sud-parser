@@ -557,3 +557,14 @@ def test_analyze_folders_counts_case_once(tmp_path):
     assert result.files_total == 3
     assert len(result.decisions) == 2
     assert [e.file for e in result.excluded] == ["b/debt.txt"]
+
+
+def test_court_after_date_on_same_line():
+    text = ("Р Е Ш Е Н И Е\nИМЕНЕМ РЕСПУБЛИКИ КАЗАХСТАН\n"
+            "26 августа 2025 года\tдело № 7142-25-00-2/99999\tгород Астана Судья Межрайонного суда по гражданским "
+            "делам города Астаны\nТестова А.К., рассмотрев в порядке упрощенного производства гражданское дело:\n"
+            "ИСТЕЦ:\nИванов Иван Иванович\nОТВЕТЧИК:\nОбъединение собственников имущества «Дом»\n"
+            "ТРЕБОВАНИЯ ИСТЦА:\nо взыскании суммы ущерба\nРЕЗОЛЮТИВНАЯ ЧАСТЬ:\nсудья\nРЕШИЛ:\nИск удовлетворить.\n")
+    d = parse_decision(text)
+    assert d.court == "Межрайонного суда по гражданским делам города Астаны"
+    assert "суд не найден" not in d.warnings
