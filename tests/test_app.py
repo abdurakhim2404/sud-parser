@@ -76,9 +76,3 @@ def test_demo_roundtrip_keeps_statistics(tmp_path):
     text = (tmp_path / "d.json").read_text(encoding="utf-8")
     assert "Петров" not in text and "Сидоров" not in text  # ФИО сторон не попали в файл (имя судьи остаётся)
 
-
-def test_hosted_upload_mode_warns_about_personal_data(monkeypatch):
-    monkeypatch.setenv("SUD_PARSER_HOSTED", "1")
-    at = AppTest.from_file(APP, default_timeout=120).run()
-    at.radio[0].set_value("Загрузить файлы").run()
-    assert any("Персональные данные" in w.value for w in at.warning)

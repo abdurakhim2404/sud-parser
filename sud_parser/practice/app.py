@@ -175,13 +175,6 @@ elif source_mode == "Готовые папки":
             st.session_state.result = analyze_folders([known[c] for c in chosen])
             st.session_state.source = "; ".join(str(known[c]) for c in chosen)
 elif source_mode == "Загрузить файлы":
-    if os.environ.get("SUD_PARSER_HOSTED"):
-        st.warning(
-            "**Персональные данные.** В решениях есть ФИО, адреса и ИИН людей. На этом сайте загруженные файлы "
-            "обрабатываются на сервере Streamlit (США), а не на вашем компьютере. Сами файлы не сохраняются, "
-            "а в таблицах ФИО заменяются инициалами, но файлы всё равно передаются на сервер. Чтобы проверить, "
-            "как программа разбирает решение, загрузите одно-два. Для работы с большим количеством решений "
-            "запускайте программу на своём компьютере (interface.bat).")
     uploads = st.file_uploader("Перетащите файлы решений сюда", accept_multiple_files=True,
                                type=[s.lstrip(".") for s in SUPPORTED])
     if st.button("Разобрать", type="primary", disabled=not uploads):
