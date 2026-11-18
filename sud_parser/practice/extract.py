@@ -247,7 +247,11 @@ _SHORT_NAME_RE = re.compile(rf"\b(?!Компани\b){_NAME_WORD}\s+[{_UP}]\.\s?
 # Заглавными: «СЕЙТЕНОВ ЕРЛАН НАСУРЛАНОВИЧ»
 _CAPS_NAME_RE = re.compile(rf"\b[{_UP}]{{2,}}\s+[{_UP}]{{2,}}\s+[{_UP}]{{2,}}(?:ВИЧ|ВН[АЫЕУ]|ҰЛЫ|ҚЫЗЫ|УЛЫ|КЫЗЫ)\w*")
 # «ИП «Х» в лице руководителя …», «ТОО «Х» представитель …» — дальше до конца идёт ФИО человека.
-_REPRESENTED_RE = re.compile(r"(\b(?:в\s+лице|представител[ья])\s+(?:руководителя\s+|директора\s+)?)(.+)$", re.I)
+_REPRESENTED_RE = re.compile(
+    r"(\b(?:в\s+лице|представител[ья])\s+(?:руководителя\s+|директора\s+)?|тұлғасында\s+)(.+)$", re.I)
+# То же внутри текста: «… «Ақылды мектеп» тұлғасында Пидахмет Айдын …» — дальше 2–3 слова имени.
+_REPRESENTED_IN_TEXT_RE = re.compile(
+    rf"(\b(?:в\s+лице|тұлғасында)\s+(?:руководителя\s+|директора\s+)?)({_NAME_WORD}(?:\s+{_NAME_WORD}){{1,2}})")
 
 
 def _initials(text: str) -> str:
@@ -283,6 +287,7 @@ def mask_text(text: str, parties: list[str] = ()) -> str:
             else rf"\b{_stem(words[0])}[{_LOW}]*\s+{words[1][0]}\."
         text = re.sub(full, lambda m: hide(initials), text)
         text = re.sub(short, lambda m: hide(initials), text)
+    text = _REPRESENTED_IN_TEXT_RE.sub(lambda m: m.group(1) + hide(_initials(m.group(2))), text)
     text = _CAPS_NAME_RE.sub(lambda m: hide(_initials(m.group(0).title())), text)
     text = _FULL_NAME_RE.sub(lambda m: hide(_initials(m.group(0))), text)
     text = _SHORT_NAME_RE.sub(lambda m: hide(_initials(m.group(0))), text)

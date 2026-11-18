@@ -2,10 +2,12 @@
 
     python -m streamlit run sud_parser/practice/app.py      (или двойной щелчок по interface.bat)
 
-Всё работает на этом компьютере: файлы решений никуда не отправляются.
+Локально всё работает на этом компьютере: файлы решений никуда не отправляются.
+На хостинге (Streamlit Community Cloud) по умолчанию показываются обезличенные демо-данные (demo/decisions.json).
 """
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -17,6 +19,7 @@ if str(ROOT) not in sys.path:  # streamlit запускает файл как с
 import pandas as pd  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from sud_parser.practice.demo import DEMO_FILE, load as _load_demo  # noqa: E402
 from sud_parser.practice.analyze import (  # noqa: E402
     MAIN_OUTCOMES, PracticeResult, analyze_folder, analyze_folders, article_table, court_key, court_names,
     money_stats, osi_pays_stats, osi_result, outcome_table, side_group,
@@ -29,6 +32,14 @@ st.set_page_config(page_title="Судебная практика ОСИ", page_i
 
 
 # --- загрузка ---------------------------------------------------------------------------------
+
+DEMO_SOURCE = "демо-данные (обезличено)"
+
+
+@st.cache_resource
+def load_demo():
+    return _load_demo(DEMO_FILE)
+
 
 def analyze_uploads(files) -> PracticeResult:
     with tempfile.TemporaryDirectory() as tmp:
@@ -118,13 +129,38 @@ def money(value: float) -> str:
 # --- страница ---------------------------------------------------------------------------------
 
 st.title("Анализ судебной практики по спорам ОСИ")
-st.caption("Загрузите решения судов (.docx, .rtf, .txt; на русском или казахском). "
-           "Программа определит стороны, исход, суммы и статьи законов. Файлы обрабатываются "
-           "на этом компьютере и никуда не отправляются.")
+st.caption("Программа читает решения судов РК (.docx, .rtf, .txt; на русском или казахском) и по каждому "
+           "определяет стороны, предмет спора, исход, взысканные суммы и статьи законов, а потом считает, "
+           "в каких спорах и как часто выигрывает ОСИ.")
+with st.expander("Как пользоваться"):
+    st.markdown(
+        "1. **Демо-данные** открываются сразу: 204 решения из Банка судебных актов portal-sot.kz, уже разобранные "
+        "программой. ФИО физлиц заменены инициалами, самих текстов решений здесь нет.\n"
+        "2. Вкладка **«Сводка»** — кто с кем судится и чем закончилось, по предмету спора, по судам, деньги.\n"
+        "3. **«Решения»** — таблица с фильтрами; ниже можно выбрать одно дело и посмотреть, что программа из него "
+        "извлекла. Номер дела можно найти на портале и сверить.\n"
+        "4. **«Нормы права»** — какие статьи применяют суды; **«Проверить вручную»** — где программа не уверена.\n"
+        "5. Кнопка **«Скачать отчёт Excel»** — то же самое в виде таблицы.\n"
+        "6. **«Загрузить файлы»** — можно перетащить свои решения (.docx), они будут разобраны так же.\n\n"
+        "Ограничения: 147 решений собраны подряд по порядку выдачи портала (не случайно, почти половина — Астана); "
+        "темы споров и правило «ОСИ выиграло» составлены разработчиком и юристом не проверены.")
 
-source_mode = st.radio("Откуда взять решения", ["Готовые папки", "Загрузить файлы", "Папка на компьютере"],
-                       horizontal=True)
-if source_mode == "Готовые папки":
+modes = []
+if DEMO_FILE.exists():
+    modes.append("Демо-данные")
+modes.append("Загрузить файлы")
+# На хостинге (переменная SUD_PARSER_HOSTED в настройках приложения) папок компьютера нет.
+if not os.environ.get("SUD_PARSER_HOSTED"):
+    if known_folders():
+        modes.append("Готовые папки")
+    modes.append("Папка на компьютере")
+source_mode = st.radio("Откуда взять решения", modes, horizontal=True)
+if source_mode == "Демо-данные":
+    if st.session_state.get("source") != DEMO_SOURCE:
+        st.session_state.result, demo_note = load_demo()
+        st.session_state.source = DEMO_SOURCE
+    st.caption(load_demo()[1])
+elif source_mode == "Готовые папки":
     known = known_folders()
     if not known:
         st.info("Готовых папок нет. Соберите решения сборщиком (python -m sud_parser.collect) "
