@@ -115,6 +115,15 @@ SET_SELECT_JS = """([label, value]) => {
   s.value = opt.value; s.dispatchEvent(new Event('change', {bubbles: true})); return 'ok';
 }"""
 
+OPTIONS_JS = """(label) => {
+  const sels = [...document.querySelectorAll('form select')];
+  const s = sels.find(s => { let el = s;
+    for (let i = 0; i < 5 && el; i++) { el = el.parentElement;
+      if (el && el.innerText && el.innerText.trim().startsWith(label)) return true; }
+    return false; });
+  return s ? [...s.options].map(o => o.text.trim()).filter(t => t && t !== 'Выберите') : [];
+}"""
+
 ROWS_JS = """() => [...document.querySelectorAll('tbody tr')].map(tr =>
   [...tr.children].map(td => td.innerText.trim()))"""
 
@@ -185,22 +194,35 @@ class Portal:
         search = self.page.locator("[data-radix-popper-content-wrapper] input[placeholder='Поиск']")
         search.wait_for(timeout=10_000)
         search.fill(category)
-        time.sleep(1)
         options = self.page.locator("[data-radix-popper-content-wrapper] [cmdk-item]")
-        texts = [t.strip() for t in options.all_inner_texts()]
         want = " ".join(category.split()).lower()
-        index = next((i for i, t in enumerate(texts) if " ".join(t.split()).lower() == want), None)
+        index, texts = None, []
+        deadline = time.time() + 20  # список категорий портал подгружает не сразу
+        while index is None and time.time() < deadline:
+            time.sleep(1)
+            texts = [t.strip() for t in options.all_inner_texts()]
+            index = next((i for i, t in enumerate(texts) if " ".join(t.split()).lower() == want), None)
+            if index is None:
+                index = next((i for i, t in enumerate(texts) if want in t.lower()), None)
         if index is None:
-            index = next((i for i, t in enumerate(texts) if want in t.lower()), None)
-        if index is None:
-            raise ValueError(f"нет категории «{category}» на портале")
+            self.debug_snapshot("no-category")
+            raise ValueError(f"нет категории «{category}» на портале (вариантов в списке: {len(texts)})")
         options.nth(index).click()
         time.sleep(0.8)
         if self.page.locator("[data-radix-popper-content-wrapper]").count():
             self.page.keyboard.press("Escape")  # если окно позволяет выбрать несколько, закрываем его
         self.log(f"Категория: {texts[index]}")
 
-    def search(self, args) -> None:
+    def advanced_open(self) -> None:
+        """Раскрыть «Расширенный поиск», если он свёрнут (кнопка работает как переключатель)."""
+        if not self.page.locator("form label", has_text="Область").first.is_visible():
+            self.button("Расширенный поиск").click()
+            time.sleep(1)
+
+    def search(self, args, region: str | None = None, court: str = "", result: str | None = None) -> int:
+        """Заполнить форму и нажать «Найти». Вернуть число найденных дел (0 — если ничего)."""
+        region = args.region if region is None else region
+        result = args.result if result is None else result
         self.set_select("Тип производства", args.case_type)
         self.set_select("Учетный год", str(args.year))
         first = self.page.get_by_role("checkbox", name="Первая инстанция")
@@ -208,17 +230,47 @@ class Portal:
             first.click()
         self.page.locator("input[name=searchText]").fill(args.keywords)
         category = getattr(args, "category", "")
-        if args.region or args.result or category:
-            self.button("Расширенный поиск").click()
-            time.sleep(1)
+        if region or result or category or court:
+            self.advanced_open()
             if category:
                 self.select_category(category)
-            if args.region:
-                self.set_select("Область", args.region)
-            if args.result:
-                self.set_select("Результат рассмотрения", args.result)
-        self.button("Найти").click()
-        self.wait_rows()
+            if region:
+                self.set_select("Область", region)
+            if court:
+                self.set_select("Судебный орган", court)  # список судов появляется после выбора области
+            if result:
+                self.set_select("Результат рассмотрения", result)
+        # Ждём ответа портала именно на этот поиск: на экране ещё видна прошлая выдача
+        # (или надпись «не найдено»), и по ней число дел прочиталось бы неверно.
+        with self.page.expect_response(lambda r: "/bank/find" in r.url, timeout=90_000) as response:
+            self.button("Найти").click()
+        if not response.value.ok:
+            raise TimeoutError(f"портал ответил {response.value.status}")
+        time.sleep(1.5)
+        return self.wait_total()
+
+    def wait_total(self, timeout: float = 40) -> int:
+        """Дождаться выдачи: число «Найдено дел» и строки списка; если ничего не нашлось — 0."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            body = self.page.inner_text("body")
+            m = re.search(r"Найдено дел:\s*([\d\s]+)", body)
+            if m:
+                total = int(re.sub(r"\D", "", m.group(1)) or 0)
+                if total == 0 or self.page.locator("tbody tr").count():
+                    return total
+            elif "дело не найдено" in body:  # «По заданным реквизитам дело не найдено»
+                return 0
+            time.sleep(0.5)
+        raise TimeoutError("Список дел не загрузился")
+
+    def options(self, label: str) -> list[str]:
+        """Варианты обычного списка формы (суды, результаты), без пустого «Выберите»."""
+        return self.page.evaluate(OPTIONS_JS, label)
+
+    def reset(self) -> None:
+        self.button("Сбросить").click()
+        time.sleep(1.5)
 
     def wait_rows(self, timeout: float = 30) -> list[list[str]]:
         deadline = time.time() + timeout
@@ -321,8 +373,7 @@ def collect(args, log=say) -> int:
         try:
             portal.wait_login(args.login_wait)
             portal.open_bank()
-            portal.search(args)
-            log(f"Портал нашёл дел: {portal.total()}")
+            log(f"Портал нашёл дел: {portal.search(args)}")
             if getattr(args, "list_only", False):
                 list_results(portal, out, args)
             else:
@@ -353,46 +404,94 @@ def list_row(cells: list[str], page: int) -> dict:
             "category": " ".join(cells[4].split()) if len(cells) > 4 else "", "page": page}
 
 
+# Когда выбрана категория дела, портал листает выдачу только до 5-й страницы (50 дел): на 6-й он
+# сбрасывает результаты. Поэтому большой запрос делим на части: область -> суд -> результат.
+PIECE_LIMIT = 50
+PIECES_FILE = "_pieces.csv"
+
+
 def list_results(portal: Portal, out: Path, args) -> list[dict]:
-    """Только список дел выдачи, без открытия дел и скачивания: быстро и бережно к порталу."""
+    """Только список дел выдачи (без открытия дел и скачивания), с делением запроса на части по 50 дел."""
     rows: dict[str, dict] = {}
-    page_no = 1
+    pieces: list[dict] = []
 
     def save() -> None:  # после каждой страницы: если портал оборвёт, собранное не пропадёт
         with (out / LIST_FILE).open("w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=LIST_FIELDS)
+            w = csv.DictWriter(f, fieldnames=LIST_FIELDS + ["piece"])
             w.writeheader()
             w.writerows(rows.values())
+        with (out / PIECES_FILE).open("w", encoding="utf-8-sig", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["piece", "found", "listed", "note"])
+            w.writeheader()
+            w.writerows(pieces)
 
-    recoveries = 0
-    while page_no <= args.max_pages:
-        try:
+    def take_pages(label: str) -> int:
+        before = len(rows)
+        page_no = 1
+        while True:
             cells = portal.wait_rows(timeout=60)
             for c in cells:
                 r = list_row(c, page_no)
+                r["piece"] = label
                 rows.setdefault(r["case_number"], r)
             save()
-            portal.log(f"Страница {page_no}: всего в списке {len(rows)}")
-            if not portal.next_page(case_number_of(cells[0][0]) if cells else ""):
+            if page_no * 10 >= PIECE_LIMIT:
+                break
+            try:
+                if not portal.next_page(case_number_of(cells[0][0]) if cells else ""):
+                    break
+            except PortalStuck as exc:
+                portal.log(f"  {label}: страница {page_no + 1} не открылась ({exc})")
                 break
             page_no += 1
             time.sleep(args.pause / 2)
-        except (PortalStuck, TimeoutError) as exc:
-            # Портал завис: ждём, ищем заново и долистываем до нужной страницы.
-            recoveries += 1
-            if recoveries > 8:
-                raise
-            wait = 30 * recoveries
-            portal.log(f"  портал завис на странице {page_no} ({exc}); жду {wait} с и ищу заново")
-            time.sleep(wait)
-            portal.open_bank_again()
-            portal.search(args)
-            for _ in range(page_no - 1):
-                first = portal.rows()[0].case_number
-                if not portal.next_page(first):
-                    break
-                time.sleep(args.pause / 2)
-    portal.log(f"Список: {len(rows)} дел -> {out / LIST_FILE}")
+        return len(rows) - before
+
+    def piece(region: str, court: str, result: str) -> None:
+        label = " / ".join(x for x in (region, court, result) if x) or "весь запрос"
+        found = None
+        for attempt in range(3):
+            try:
+                portal.reset()
+                found = portal.search(args, region=region, court=court, result=result)
+                break
+            except (TimeoutError, PortalStuck) as exc:
+                wait = 30 * (attempt + 1)
+                portal.log(f"  {label}: поиск не загрузился ({exc}); жду {wait} с")
+                time.sleep(wait)
+                portal.open_bank_again()
+        if found is None:
+            pieces.append({"piece": label, "found": "", "listed": 0, "note": "поиск не загрузился"})
+            save()
+            return
+        if found <= PIECE_LIMIT:
+            got = take_pages(label) if found else 0
+            pieces.append({"piece": label, "found": found, "listed": got, "note": ""})
+            portal.log(f"  {label}: найдено {found}, в списке {got}; всего {len(rows)}")
+            save()
+            return
+        # Больше 50: делим на следующем уровне.
+        if not region:
+            sub = [(r, "", result) for r in portal.options("Область")]
+        elif not court and portal.options("Судебный орган"):
+            sub = [(region, c, result) for c in portal.options("Судебный орган")]
+        elif not result:
+            sub = [(region, court, r) for r in portal.options("Результат рассмотрения")]
+        else:
+            sub = []
+        if not sub:  # делить больше не на что: берём первые 50
+            got = take_pages(label)
+            pieces.append({"piece": label, "found": found, "listed": got, "note": "больше 50, взяты первые 50"})
+            portal.log(f"  {label}: найдено {found}, делить дальше нечем — взяты первые {got}")
+            save()
+            return
+        portal.log(f"  {label}: найдено {found} — делю на {len(sub)} частей")
+        for r, c, res in sub:
+            piece(r, c, res)
+
+    piece(args.region, "", args.result)
+    found_sum = sum(int(p["found"] or 0) for p in pieces if not p["note"] or p["note"].startswith("больше"))
+    portal.log(f"Список: {len(rows)} дел (по частям найдено {found_sum}) -> {out / LIST_FILE}")
     return list(rows.values())
 
 
