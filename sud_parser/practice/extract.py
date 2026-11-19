@@ -152,6 +152,7 @@ class Decision:
     defendants: list[str] = field(default_factory=list)
     third_parties: list[str] = field(default_factory=list)
     claim: str = ""
+    claim_amount: float | None = None   # сумма иска (что просил истец), без судебных расходов
     topic: str = ""
     outcome: str = UNKNOWN          # исход основного иска
     counter_outcome: str = ""       # исход встречного иска, если он был
@@ -746,6 +747,105 @@ def split_amounts(operative_lines: list[str], osi_plaintiff: bool) -> dict[str, 
     return out
 
 
+# --- Сумма иска: что истец просил взыскать (без судебных расходов) ---------------------------------
+# Ищем в описательной части предложения, где говорит истец: «просит взыскать…», «обратился с иском
+# о взыскании…», «уточнив требования…». Рассуждения суда («подлежит взысканию») и просьбы ответчика
+# пропускаем. Уточнённые требования важнее первоначальных — берём последние.
+CLAIM_SAY_RE = re.compile(
+    r"\bпрос(?:ит|ил[аи]?|ят|или)\b|\bтребу\w*|заявил\w*\s+требовани|обратил\w*\s+(?:в\s+суд|с\s+иск)|"
+    r"предъявил\w*|исков\w*\s+требовани|"
+    r"цен\w*\s+иска|сумм\w*\s+(?:иска|требований)|сұра\w*|талап\s+ет\w*|талап\s+қой\w*", re.I)
+# Уточнение иска, а не «дополнительное соглашение» или «увеличение тарифа».
+CLAIM_REFINED_RE = re.compile(
+    r"уточн\w*|увеличи(?:в|л\w*)\b|уменьши(?:в|л\w*)\b|дополни(?:в|л\w*)\b|"
+    r"(?:увеличени|уменьшени|дополнени)\w*\s+(?:исков|иска|требован|размер\w*\s+исков)|нақтыла|көбейт|азайт", re.I)
+CLAIM_DIRECT_RE = re.compile(r"цен\w*\s+иска|сумм\w*\s+(?:иска|требований)\s+(?:составля|—|-)", re.I)
+CLAIM_SKIP_RE = re.compile(
+    r"ответчик\w*\s+(?:в\s+\w+\s+)?(?:прос|ходатайств|заяв)|представител\w*\s+ответчик|встречн|"
+    r"подлеж\w*\s+взыскан|суд\s+(?:считает|полагает|приходит|находит)|взыскав\b|претензи|"
+    r"отзыв|возраж|не\s+соглас|в\s+иске\s+отказать|отказать\s+в\s+(?:удовлетворении|иске)|"
+    r"^\s*взыскать\b|^\s*\d+\.\s*взыскать\b", re.I)
+# В иске должны просить деньги, а не только «признать решение об утверждении тарифа 50 тенге».
+CLAIM_MONEY_RE = re.compile(r"взыск|возмещ|возмест|выплат|верну|возврат|компенсац|задолж|неустойк|\bпен[ияюе]\b|"
+                            r"ущерб|убытк|\bдолг|өндір|қайтар|өтеу|берешек|қарыз", re.I)
+# Дальше идёт разбивка уже названной суммы: «3 740 430 тенге, включающаяся в себя: 1) …».
+CLAIM_BREAKDOWN_RE = re.compile(r"включа\w*|в\s+том\s+числе|из\s+(?:них|которых)|состоящ\w*\s+из|оның\s+ішінде", re.I)
+# Тарифы и ставки: «50 тенге с кв.м.», «28 000 тенге в месяц».
+CLAIM_RATE_RE = re.compile(r"\s*(?:с|за|на)\s+(?:1\s*)?(?:кв|м2|м²|квадрат|один)|\s*в\s+(?:месяц|год)|\s*ежемесячн", re.I)
+# После «взыскать …» идут другие требования: «…, признать договор расторгнутым, признать акт на сумму …».
+CLAIM_NEXT_DEMAND_RE = re.compile(r"\b(?:признать|обязать|расторгнуть|установить|отменить|выселить|освободить)\b", re.I)
+# Сумма судебных расходов — не часть иска: «государственной пошлины в размере …», «услуг представителя …».
+CLAIM_COST_RE = re.compile(
+    r"пошлин|представит|предс?т?а?в?ит\w*\s+(?:расход|услуг)|юридическ\w*\s+(?:услуг|помощ)|почтов|курьер|"
+    r"нотари|исполнительн\w*\s+надпис|составлени\w*\s+(?:иска|исков|заявлен)|"
+    r"доверенност|эксперт|"
+    r"оценк|издерж|судебн\w*\s+расход|баж|өкіл|сот\s+шығын", re.I)
+
+
+def claim_candidates(body: str, claim_block: str = ""):
+    """Предложения со словами истца и суммами: (вид, сумма, предложение); вид — refined / direct / initial."""
+    def clean(t: str) -> str:
+        t = _norm(t.replace("\xa0", " "))
+        t = re.sub(r"\b(\d{4,})\s(\d{3})(?=\s*(?:тенге|теңге|тг\b))", r"\1\2", t)  # «5000 000 тенге»
+        return re.sub(r"(\d)\s*,\s+(\d{1,2})(?=\s*(?:тенге|теңге|тг\b))", r"\1,\2", t)  # «478 627, 20 тенге»
+
+    # Не режем на инициалах: «взыскать с К. Е. Б. 17599 тенге».
+    sentences = re.split(r"(?<=[.;])(?<!\b[А-ЯЁӘІҢҒҮҰҚӨҺ]\.)\s+(?=[А-ЯЁӘІҢҒҮҰҚӨҺ\d«])", clean(body))
+    if claim_block:
+        sentences.insert(0, "просит " + clean(claim_block))
+    for s in sentences:
+        refined, direct = CLAIM_REFINED_RE.search(s), CLAIM_DIRECT_RE.search(s)
+        if not MONEY_RE.search(s) or CLAIM_SKIP_RE.search(s) or not (CLAIM_SAY_RE.search(s) or refined):
+            continue
+        if not (direct or CLAIM_MONEY_RE.search(s)) or len(s) > 1500:
+            continue  # длинный кусок без точек — обычно шапка решения, а не требование
+        s = re.sub(r"«[^»]{25,}»", " ", s)  # «О взыскании … 3 720 050 тенге» — название документа, не иск
+        # Деньги считаем от «взыскать» до следующего неденежного требования.
+        start = re.search(r"взыск|өндір", s, re.I)
+        before = CLAIM_NEXT_DEMAND_RE.search(s, 0, start.start()) if start else None
+        separate = re.search(r"(?:[;,]|\bи)\s*о\s+$", s[max(0, start.start() - 8):start.start()]) if start else None
+        if before and not separate and re.match(r"взыскани", s[start.start():], re.I):
+            continue  # «отменить исполнительную надпись о взыскании …» — требование не денежное
+        if not start and not direct and CLAIM_NEXT_DEMAND_RE.search(s):
+            continue  # «признать надпись не подлежащей исполнению в сумме …» — денег не просят
+        end = len(s)
+        if start:
+            nxt = CLAIM_NEXT_DEMAND_RE.search(s, start.end())
+            end = nxt.start() if nxt else end
+        brk = CLAIM_BREAKDOWN_RE.search(s, start.end() if start else 0)
+        if brk and MONEY_RE.search(s, 0, brk.start()):
+            end = min(end, brk.start())
+        total, prev = 0.0, 0
+        for m in MONEY_RE.finditer(s):
+            if not direct and (start and m.start() < start.start() or m.start() >= end):
+                continue
+            near = s[max(prev, m.start() - 70):m.start()]
+            prev = m.end()
+            if CLAIM_COST_RE.search(near) or TOTAL_RE.search(near) or CLAIM_RATE_RE.match(s, m.end()):
+                continue
+            if re.search(r"\bпо\s*$", near) and EACH_RE.search(s[m.end():m.end() + 40]):
+                continue  # «по 125 000 тенге с каждого» — разбивка уже названной суммы
+            total += _parse_money(m.group(1), m.group(2))
+        if total <= 0:
+            continue
+        kind = "direct" if direct else "refined" if refined else "initial"
+        yield kind, total, s
+
+
+def claim_amount(body: str, claim_block: str = "") -> float | None:
+    """Сумма иска по описательной части решения; None — в тексте её нет (часто в коротких решениях)."""
+    initial = refined = direct = None
+    for kind, total, _ in claim_candidates(body, claim_block):
+        if kind == "direct":
+            direct = total
+        elif kind == "refined":
+            refined = total
+        elif initial is None:
+            initial = total
+    value = refined if refined is not None else direct if direct is not None else initial
+    return round(value, 2) if value is not None else None
+
+
 def classify_topic(claim: str) -> str:
     for name, rx in TOPICS:
         if rx.search(claim) or (name in kz.TOPICS_KZ and re.search(kz.TOPICS_KZ[name], claim, re.I)):
@@ -912,6 +1012,10 @@ def parse_decision(text: str, file: str = "") -> Decision:
         split = split_amounts(operative, osi_plaintiff="истец" in d.osi_role)
         d.amounts, d.osi_pays, d.other_awards = split[TO_OSI], split[FROM_OSI], split[OTHER]
         d.obligations = sum(1 for l in operative if re.match(r"(Обязать|Признать)\b", l))
+
+    joined = "\n".join(nonempty)
+    op = OPERATIVE_INLINE_RE.search(joined)
+    d.claim_amount = claim_amount(joined[:op.start()] if op else "", d.claim)
 
     d.topic = classify_topic(d.claim or d.outcome_text)
     d.citations, unresolved = extract_citations(text)

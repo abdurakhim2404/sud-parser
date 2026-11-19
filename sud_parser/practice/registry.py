@@ -240,7 +240,7 @@ def to_row(d: Decision, meta: Meta, courts: dict[str, str], who: str, rel_file: 
         party_type(d.defendants[0], osi_plaintiff) if d.defendants else "Прочее",
         side(d.third_parties),
         d.masked(" ".join(d.claim.split()))[:300],
-        "",                                              # сумма иска: программа её пока не извлекает
+        str(round(d.claim_amount)) if d.claim_amount else "",  # пусто: в тексте решения суммы иска нет
         str(round(awarded)) if awarded else "",
         VERDICTS.get(d.outcome, "Прочее"),
         "",                                              # прямой ссылки нет: банк актов открывается только по ЭЦП
