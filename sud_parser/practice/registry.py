@@ -121,15 +121,16 @@ OBLAST_KZ = {
 }
 
 
-def place(d: Decision) -> str:
+def place(d: Decision, court: str = "") -> str:
     """Город решения, а для районных судов без города — область из названия суда."""
     city = CITY_FIX.get(d.city, d.city)
     if city:
         return city
-    m = re.search(r"([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?(?:ской|цкой))\s+области", d.court)  # Восточно-Казахстанской
+    court = f"{court} {d.court}"
+    m = re.search(r"([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?(?:ской|цкой))\s+области", court)  # Восточно-Казахстанской
     if m:
         return m.group(1)[:-2] + "ая область"
-    m = re.search(r"((?:Батыс |Шығыс |Солтүстік )?\w+)\s+облысы", d.court)
+    m = re.search(r"((?:Батыс |Шығыс |Солтүстік )?\w+)\s+облысы", court)
     if m:
         name = OBLAST_KZ.get(m.group(1), m.group(1))
         return f"{name} область" if name.endswith("ская") else f"область {name}"
@@ -222,7 +223,7 @@ def to_row(d: Decision, meta: Meta, courts: dict[str, str], who: str, rel_file: 
         notes.append("проверить: " + "; ".join(d.warnings))
     return [
         d.case_number,                                   # ID записи: номер дела уникален для решения
-        place(d),
+        place(d, courts.get(court_key(d), "")),
         courts.get(court_key(d), d.court),
         d.case_number,
         case_year(d.case_number, d.date),
@@ -265,7 +266,7 @@ def build(sources: list[tuple[Path, str, str]], out: Path, who: str) -> int:
         if not meta.downloaded:
             meta = Meta(meta.portal_category, datetime.fromtimestamp(src.stat().st_mtime).date().isoformat(),
                         meta.note)
-        rel = Path("decisions") / city_latin(place(d)) / case_year(d.case_number, d.date) / (
+        rel = Path("decisions") / city_latin(place(d, courts.get(court_key(d), ""))) / case_year(d.case_number, d.date) / (
             safe_case(d.case_number) + src.suffix.lower())
         (out / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, out / rel)
