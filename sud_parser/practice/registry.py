@@ -152,7 +152,8 @@ def case_year(case_number: str, decided: date | None) -> str:
 def party_type(name: str, other_side_has_osi: bool) -> str:
     kind = party_kind(name)
     if kind == PERSON:
-        return "Жилец / собственник" if other_side_has_osi else "Прочее"
+        # в жилищных спорах человек почти всегда жилец или собственник квартиры
+        return "Жилец / собственник"
     for label, rx in PARTY_TYPES:
         if label == "КСК" and rx.search(name):
             return label
@@ -221,6 +222,8 @@ def to_row(d: Decision, meta: Meta, courts: dict[str, str], who: str, rel_file: 
         notes.append(f"встречный иск: {d.counter_outcome}")
     if d.warnings:
         notes.append("проверить: " + "; ".join(d.warnings))
+    if not d.plaintiffs or not d.defendants:
+        notes.append("проверить: стороны не распознаны в тексте решения")
     return [
         d.case_number,                                   # ID записи: номер дела уникален для решения
         place(d, courts.get(court_key(d), "")),
@@ -231,8 +234,10 @@ def to_row(d: Decision, meta: Meta, courts: dict[str, str], who: str, rel_file: 
         "Первая",
         "Гражданское",
         cid, cname,
-        side(d.plaintiffs), party_type(d.plaintiffs[0], osi_defendant) if d.plaintiffs else "",
-        side(d.defendants), party_type(d.defendants[0], osi_plaintiff) if d.defendants else "",
+        side(d.plaintiffs) or "не распознан",
+        party_type(d.plaintiffs[0], osi_defendant) if d.plaintiffs else "Прочее",
+        side(d.defendants) or "не распознан",
+        party_type(d.defendants[0], osi_plaintiff) if d.defendants else "Прочее",
         side(d.third_parties),
         d.masked(" ".join(d.claim.split()))[:300],
         "",                                              # сумма иска: программа её пока не извлекает

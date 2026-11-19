@@ -29,6 +29,7 @@ def test_helpers():
     assert party_type("Республиканское государственное учреждение «Управление государственных доходов»", True) \
         == "Госорган / акимат"
     assert party_type("Потребительский кооператив собственников КСК «Дом»", False) == "КСК"
+    assert party_type("Иванов Иван Иванович", False) == "Жилец / собственник"
 
 
 def test_place_from_court_when_no_city():
