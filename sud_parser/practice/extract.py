@@ -339,8 +339,9 @@ def _sections(lines: list[str]) -> tuple[list[str], list[tuple[str, list[str]]]]
     blocks: list[tuple[str, list[str]]] = []
     for line in lines:
         h = _heading(line)
-        if h and h[0].startswith("ТРЕБОВАНИЙ") and blocks and blocks[-1][0].startswith("ТРЕТЬ") \
-                and not blocks[-1][1]:
+        # «ТРЕБОВАНИЙ НА ПРЕДМЕТ СПОРА:» или просто «ТРЕБОВАНИЯ:» — но не «ТРЕБОВАНИЯ ИСТЦА:»
+        if h and (h[0].startswith("ТРЕБОВАНИЙ") or h[0] in ("ТРЕБОВАНИЯ", "ТРЕБОВАНИЕ")) and blocks \
+                and blocks[-1][0].startswith("ТРЕТЬ") and not blocks[-1][1]:
             # «ТРЕТЬИ ЛИЦА, НЕ ЗАЯВЛЯЮЩИЕ САМОСТОЯТЕЛЬНЫХ» / «ТРЕБОВАНИЙ НА ПРЕДМЕТ СПОРА:» —
             # один заголовок на двух строках.
             if h[1]:
