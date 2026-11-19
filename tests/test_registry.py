@@ -30,6 +30,13 @@ def test_helpers():
         == "Госорган / акимат"
     assert party_type("Потребительский кооператив собственников КСК «Дом»", False) == "КСК"
     assert party_type("Иванов Иван Иванович", False) == "Жилец / собственник"
+    # роль ТОО по сути спора: должник ОСИ — собственник помещения, по дефектам — застройщик
+    debt = "Взыскание задолженности по взносам"
+    assert party_type("ТОО «Ромашка»", True, debt, defendant=True, claim="о взыскании задолженности") \
+        == "Жилец / собственник"
+    assert party_type("ТОО «Ромашка»", True, debt, defendant=True, claim="о расторжении договора") == "Прочее"
+    assert party_type("ТОО «Ромашка»", True, "Устранение строительных дефектов", defendant=True) == "Застройщик"
+    assert party_type("Талғар ауданының әкімі", False) == "Госорган / акимат"
 
 
 def test_place_from_court_when_no_city():

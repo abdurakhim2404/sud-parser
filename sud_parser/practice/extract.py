@@ -62,6 +62,12 @@ HEADINGS = (
     "МОТИВИРОВОЧН", "РЕЗОЛЮТИВН", "РЕШИЛ", "СУДРЕШИЛ", "УСТАНОВИЛ", "ПОСТАНОВИЛ", "ОПРЕДЕЛИЛ",
     "ЗАЯВИТЕЛ", "ЗАИНТЕРЕСОВАНН", "ПРОКУРОР", "ПРЕДСТАВИТЕЛ", "ЗАЯВЛЕНН", "ИСКОВЫЕТРЕБОВАН",
 )
+LOWER_HEADING_RE = re.compile(
+    r"(?:истц?ы?|истец|ответчик\w*|трет\w+\s+лиц\w*|требовани\w+\s+истц\w*|заявител\w*)"
+    r"(?:\s+по\s+(?:первоначальному|основному|первому|встречному)\s+иску)?$", re.I)
+# Упрощённое решение без блоков: «…гражданское дело по иску ОСИ "Х" к К. А. К. о возмещении ущерба».
+INLINE_PARTIES_RE = re.compile(
+    r"по\s+(?:исковому\s+заявлению|иску)\s+(.{3,300}?)\s+к\s+(.{2,300}?)\s+((?:о|об)\s[^,.;]{3,200})", re.I)
 # Блок требований истца: «ТРЕБОВАНИЯ ИСТЦА», «ЗАЯВЛЕННОЕ ТРЕБОВАНИЕ», «ИСКОВЫЕ ТРЕБОВАНИЯ».
 # Не «ТРЕБОВАНИЙ НА ПРЕДМЕТ СПОРА» — это вторая строка заголовка «ТРЕТЬИ ЛИЦА, НЕ ЗАЯВЛЯЮЩИЕ …».
 CLAIM_HEADINGS = ("ТРЕБОВАНИЯ", "ТРЕБОВАНИЕ", "ЗАЯВЛЕНН", "ИСКОВЫЕТРЕБОВАН")
@@ -153,6 +159,7 @@ class Decision:
     third_parties: list[str] = field(default_factory=list)
     claim: str = ""
     claim_amount: float | None = None   # сумма иска (что просил истец), без судебных расходов
+    special: bool = False               # особое производство: заявитель без ответчика
     topic: str = ""
     outcome: str = UNKNOWN          # исход основного иска
     counter_outcome: str = ""       # исход встречного иска, если он был
@@ -309,8 +316,12 @@ def _heading(line: str) -> tuple[str, str] | None:
     head, _, rest = line.partition(":")
     if len(head) > 140:
         return None
+    head = re.sub(r"\([^()]*\)", " ", head)  # «В СУДЕ УЧАСТВОВАЛИ(посредством WhatsApp):»
     letters = [c for c in head if c.isalpha()]
-    if not letters or any(c.islower() for c in letters):
+    if not letters:
+        return None
+    # Обычно заголовок прописными («ОТВЕТЧИК:»), но бывает «Ответчик:» и «ОТВЕТЧИК по первому иску:».
+    if any(c.islower() for c in letters) and not (_ and LOWER_HEADING_RE.match(head.strip())):
         return None
     key = _compact(head)
     kz_key = kz.heading_key(key)  # «ТАЛАП ҚОЮШЫ:» -> «ИСТЕЦ» и т. д.
@@ -390,7 +401,7 @@ def split_parties(lines: list[str]) -> list[str]:
     for item in merged:
         item = re.sub(r"\([^()]*\)", " ", item)  # «(далее – истец)», «(далее – ОСИ)»
         for part in _split_outside_quotes(item):
-            part = _norm(part).strip(" ,;.:–-")
+            part = re.sub(r"^\d{1,2}[.)]\s*", "", _norm(part).strip(" ,;.:–-"))  # «1. ТОО …»
             if not part:
                 continue
             continues_prev = part[0].islower() and not re.match(
@@ -985,8 +996,15 @@ def parse_decision(text: str, file: str = "") -> Decision:
 
     d.plaintiffs = split_parties(_block(blocks, "ИСТЕЦ", "ИСТЦЫ", "ЗАЯВИТЕЛ") or [])
     d.defendants = split_parties(_block(blocks, "ОТВЕТЧИК") or [])
-    d.third_parties = split_parties(_block(blocks, "ТРЕТЬ") or [])
-    d.claim = _norm(" ".join(_block(blocks, *CLAIM_HEADINGS) or []))
+    # третьи лица бывают в двух блоках: «на стороне истца» и «на стороне ответчика»
+    d.third_parties = split_parties([l for key, ls in blocks if key.startswith("ТРЕТЬ") for l in ls])
+    d.special = not d.defendants and _block(blocks, "ЗАЯВИТЕЛ") is not None
+    if not d.plaintiffs and not d.defendants:
+        m = INLINE_PARTIES_RE.search(header_text)
+        if m:
+            d.plaintiffs, d.defendants = split_parties([m.group(1)]), split_parties([m.group(2)])
+            d.claim = d.claim or _norm(m.group(3))
+    d.claim = _norm(" ".join(_block(blocks, *CLAIM_HEADINGS) or [])) or d.claim
 
     operative: list[str] = []
     for key, block_lines in blocks:

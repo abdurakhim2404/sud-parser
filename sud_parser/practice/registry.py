@@ -48,11 +48,12 @@ PARTY_TYPES = [
     ("Госорган / акимат", re.compile(
         r"акимат|әкімдігі|государственн\w* (?:учреждени|орган|доход)|\b(?:ГУ|РГУ|КГУ|ГККП|ГКП)\b|министерств|"
         r"комитет|департамент|инспекци|управлени\w* (?:государствен|жилищ|строитель|архитектур|полици)|"
-        r"мемлекеттік|Правительство для граждан", re.I)),
+        r"мемлекеттік|Правительство для граждан|әкімі\b|\bаким\b|\bакима\b", re.I)),
     ("Застройщик", re.compile(r"строй|құрылыс|девелоп|застройщ|construction|building|\bBI\b|Group", re.I)),
     ("Подрядчик", re.compile(r"подряд|ремонт|монтаж", re.I)),
     ("Поставщик услуг", re.compile(
-        r"энерго|электр|тепло|газ|\bсу\b|водоканал|сервис|service|телеком|жарык|жылу|лифт|коммунал|сбыт", re.I)),
+        r"энерго|электр|тепло|газ|gaz|energy|\bсу\b|водоканал|сервис|service|телеком|жарык|жылу|лифт|коммунал|сбыт",
+        re.I)),
 ]
 
 # Категория портала (текст в выдаче) -> ID и название категории реестра (лист «Категории»).
@@ -149,7 +150,8 @@ def case_year(case_number: str, decided: date | None) -> str:
     return str(decided.year) if decided else ""
 
 
-def party_type(name: str, other_side_has_osi: bool) -> str:
+def party_type(name: str, other_side_has_osi: bool, topic: str = "", defendant: bool = False,
+               claim: str = "") -> str:
     kind = party_kind(name)
     if kind == PERSON:
         # в жилищных спорах человек почти всегда жилец или собственник квартиры
@@ -162,6 +164,12 @@ def party_type(name: str, other_side_has_osi: bool) -> str:
     for label, rx in PARTY_TYPES:
         if rx.search(name):
             return label
+    # Название не подсказывает роль — смотрим на суть спора.
+    if defendant and other_side_has_osi:
+        if topic.startswith("Взыскание задолженности") and not re.search(r"договор|упущенн", claim, re.I):
+            return "Жилец / собственник"   # ТОО или ИП — собственник нежилого помещения, должник ОСИ
+        if topic.startswith("Устранение строительных дефектов"):
+            return "Застройщик"
     return "Прочее"
 
 
@@ -222,7 +230,7 @@ def to_row(d: Decision, meta: Meta, courts: dict[str, str], who: str, rel_file: 
         notes.append(f"встречный иск: {d.counter_outcome}")
     if d.warnings:
         notes.append("проверить: " + "; ".join(d.warnings))
-    if not d.plaintiffs or not d.defendants:
+    if not d.plaintiffs or (not d.defendants and not d.special):
         notes.append("проверить: стороны не распознаны в тексте решения")
     return [
         d.case_number,                                   # ID записи: номер дела уникален для решения
@@ -235,9 +243,10 @@ def to_row(d: Decision, meta: Meta, courts: dict[str, str], who: str, rel_file: 
         "Гражданское",
         cid, cname,
         side(d.plaintiffs) or "не распознан",
-        party_type(d.plaintiffs[0], osi_defendant) if d.plaintiffs else "Прочее",
-        side(d.defendants) or "не распознан",
-        party_type(d.defendants[0], osi_plaintiff) if d.defendants else "Прочее",
+        party_type(d.plaintiffs[0], osi_defendant, d.topic) if d.plaintiffs else "Прочее",
+        side(d.defendants) or ("нет (особое производство)" if d.special else "не распознан"),
+        party_type(d.defendants[0], osi_plaintiff, d.topic, defendant=True, claim=d.claim)
+        if d.defendants else "Прочее",
         side(d.third_parties),
         d.masked(" ".join(d.claim.split()))[:300],
         str(round(d.claim_amount)) if d.claim_amount else "",  # пусто: в тексте решения суммы иска нет
