@@ -115,6 +115,7 @@ def decisions_df(decisions) -> pd.DataFrame:
         "Исход": d.outcome,
         "Встречный иск": d.counter_outcome or "—",
         "Для ОСИ": won_label(d),
+        "Сумма иска, ₸": d.claim_amount,
         "В пользу ОСИ, ₸": d.amounts.total,
         "С ОСИ, ₸": d.osi_pays.total,
         "Предупреждения": "; ".join(d.warnings),
@@ -273,6 +274,7 @@ with tab_list:
     st.caption(f"Показано {len(shown)} из {len(df)}")
     st.dataframe(shown, hide_index=True, width="stretch", column_config={
         "Дата": st.column_config.DateColumn(format="DD.MM.YYYY"),
+        "Сумма иска, ₸": st.column_config.NumberColumn(format="%.0f"),
         "В пользу ОСИ, ₸": st.column_config.NumberColumn(format="%.0f"),
         "С ОСИ, ₸": st.column_config.NumberColumn(format="%.0f"),
     })
@@ -285,9 +287,13 @@ with tab_list:
         day = f"{d.date:%d.%m.%Y}" if d.date else "—"
         st.write(f"**Суд:** {d.court or '—'}  \n**Судья:** {d.judge or '—'}  \n**Дата:** {day}")
         st.write("**Истцы:** " + ("; ".join(display_party(x) for x in d.plaintiffs) or "—"))
-        st.write("**Ответчики:** " + ("; ".join(display_party(x) for x in d.defendants) or "—"))
+        st.write("**Ответчики:** " + ("; ".join(display_party(x) for x in d.defendants)
+                                      or ("нет (особое производство)" if d.special else "—")))
+        if d.third_parties:
+            st.write("**Третьи лица:** " + "; ".join(display_party(x) for x in d.third_parties))
         st.write(f"**Предмет спора:** {d.topic or '—'}")
         st.write(f"**Требования:** {d.masked(d.claim[:600]) or '—'}")
+        st.write(f"**Сумма иска:** {money(d.claim_amount) if d.claim_amount else '— (в тексте нет или иск неденежный)'}")
     with b:
         st.write(f"**Исход:** {d.outcome}" + (f"  \n**Встречный иск:** {d.counter_outcome}" if d.counter_outcome else ""))
         st.write(f"**Резолютивная часть:** {d.masked(d.outcome_text[:600]) or '—'}")
