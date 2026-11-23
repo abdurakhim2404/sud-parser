@@ -304,6 +304,132 @@ def mask_text(text: str, parties: list[str] = ()) -> str:
     return text
 
 
+# Прочие персональные данные в полном тексте решения.
+_IIN_RE = re.compile(r"(?<![\d/-])\d{12}(?![\d/-])")                     # ИИН (и БИН — их не различить)
+_IBAN_RE = re.compile(r"\bKZ\d{2}[0-9A-Z]{13,16}\b")
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+7|8)[\s(-]*\d{3}[\s)-]*\d{3}[\s-]*\d{2}[\s-]*\d{2}(?!\d)")
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b")
+# «кв. 45», «квартира №12», «45-пәтер», «пәтер 3»: номер квартиры вместе с адресом указывает на человека.
+# «кв.5относится» — после номера бывает слово без пробела, поэтому без \b в конце.
+_FLAT_RE = re.compile(r"\b((?:кв\.?|квартир\w*|пәтер\w*|ком\.|комнат\w*)\s*№?\s*)\d+(?:/\d+)?(?:[а-яА-Я](?![а-яА-Я]))?|"
+                      r"\b\d+\s*[-–]?\s*(пәтер\w*)", re.I)
+_BIRTH_RE = re.compile(r"\b\d{1,2}\.\d{1,2}\.\d{4}\s*(?:г\.?\s*)?(?:года?\s+)?(?:рождения|г\.\s?р\.|туған)", re.I)
+# Свидетель, гражданин, представитель — люди не из шапки решения. Дальше 1–3 слова имени,
+# если это не орган или сторона («представитель Истца», «представитель Акимата»).
+_NOT_NAME = (r"(?!(?:Истц|Ответчик|Отдел|Управлени|Акимат|Комитет|Инспекци|Банк|Товарищ|Объединени|Департамент|"
+             r"Министерств|Прокурат|Республик|Государствен|Акционерн|Компани|Учрежден|Филиал|Город|Суд|Заявител|"
+             r"Третье|Третьего|Кооператив|Корпораци|Центр|Агентств|Фонд|Совет|Правлени|Суд|Коммунальн|"
+             r"Общества|Ассоциаци|Палат)\w*)")
+_NOT_PERSON_WORD_RE = re.compile(
+    r"Астан|Алмат|Шымкент|Республик|Казахстан|Қазақстан|Частн|Ішкі|істер|Министр|Департамент|Управлени|"
+    r"област|облыс|район|аудан|город|қала|Акимат|әкім", re.I)
+_WITNESS_RE = re.compile(
+    rf"(\b(?:свидетел\w*|гражданин\w*|гражданк\w*|гр\.|представител\w*|куәгер\w*|азамат\w*|өкіл\w*|"
+    rf"нотариус\w*|ЧСИ|исполнител\w*|орындаушы\w*|председател\w*(?:\s+(?:КСК|ОСИ|ПКСК))?\s*[–-]?|"
+    rf"предпринимател\w*|секретар\w*(?:\s+судебного\s+заседания)?|директор\w*|бухгалтер\w*|эксперт\w*|"
+    rf"специалист\w*|руководител\w*|төраға\w*|хатшы\w*)\s+)"
+    rf"({_NOT_NAME}{_NAME_WORD}(?:\s+{_NOT_NAME}{_NAME_WORD}){{0,2}})")
+# Инициалы перед фамилией: «Д.Ж.Оңайбеков», «А. Жанибеков» -> «Д.Ж.О.», «А. Ж.»
+# Слитно («А.Жанибеков») — любое слово; через пробел — только с окончанием фамилии, иначе «… Т. Ж. Д. Суд
+# считает» превратилось бы в «Т. Ж. Д. С. считает».
+_SURNAME_END = (rf"(?:[{_LOW}]*(?:ов|ев|ёв|ин|ын|ий|ая|ук|юк|бек|бай|улы|ұлы|кызы|қызы)[{_LOW}]{{0,4}}|"  # «Оразалиеваның»
+                rf"[{_LOW}]*(?:енко|ько))")  # «Шевченко», «Зосько» не склоняются
+_INITIALS_FIRST_RE = re.compile(
+    rf"(\b[{_UP}]\.(?:[{_UP}]\.)?)({_NAME_WORD})|(\b[{_UP}]\.\s(?:[{_UP}]\.\s)?)([{_UP}]{_SURNAME_END})\b")
+# «Фамилия Имя» и «Имя Фамилия» без отчества («свидетель … Кожахметова Раушан», «Мирас Айдарулы»): одно из слов
+# с окончанием фамилии. Но это же и улицы («улица Сағадат Нұрмағамбетов, дом 31А») — их отсекает _mask_pair.
+_PERSON_PAIR_RE = re.compile(rf"\b([{_UP}]{_SURNAME_END})\s+({_NAME_WORD})\b|\b({_NAME_WORD})\s+([{_UP}]{_SURNAME_END})\b")
+_STREET_BEFORE_RE = re.compile(r"(?:ул\.|улиц\w*|просп\w*|пр\.|пр-т|мкр\.?|микрорайон\w*|переул\w*|пер\.|бульвар\w*|"
+                               r"шоссе|им\.|имени|көше\w*|даңғыл\w*|ауыл\w*|село|с\.|жилого\s+дома|комплекс\w*|"
+                               r"[«\"]|ОСИ|по\s+улице)\s*(?:[А-ЯЁӘІҢҒҮҰҚӨҺ][\w-]*\s+){0,2}$", re.I)
+_STREET_AFTER_RE = re.compile(r"^\s*(?:,?\s*(?:дом|д\.|№|\d)|көше|даңғыл|ауыл|[»\"]|\d)", re.I)
+# Фамилия перед инициалами, в том числе с опечаткой: «Суюновой Ж,М.», «Маликовой Б. А. С.»
+_SURNAME_INITIALS_RE = re.compile(rf"\b([{_UP}]{_SURNAME_END})(\s+[{_UP}][.,]\s?[{_UP}][.,])")
+
+
+# Слова с заглавной, которые не имена: начало предложения, роли, документы, места.
+_NOT_NAME_WORD_RE = re.compile(
+    r"(?:Поскольку|Между|Согласно|Однако|Также|Кроме|Таким|После|Поэтому|Вместе|Если|Когда|Учитывая|Исходя|"
+    r"При|Как|Так|Это|Данн|Указанн|Собственник|Застройщик|Заказчик|Подрядчик|Исполнител|Управляющ|Копия|Копии|"
+    r"Справк|Представител|Председател|Шешім|Көшірме|Үшінші|Ассоциаци|Объединени|Имуществ|Услуг|Судья|Сот|"
+    r"Алмат|Астан|Қызылорд|Кызылорд|Қармақшы|Шымкент|Қазақстан|Казахстан)", re.I)
+_PLACE_AFTER_RE = re.compile(r"^\s*(?:облыс|ауданы|ауылы|қаласы|района|области|город)", re.I)
+
+
+def _not_a_name(word: str, after: str = "") -> bool:
+    return bool(_NOT_NAME_WORD_RE.match(word) or _ADJECTIVE_END_RE.search(word) or _TERM_RE.match(word)
+                or _NOT_PERSON_WORD_RE.search(word) or _PLACE_AFTER_RE.match(after))
+
+
+def _mask_surname_initials(m: re.Match) -> str:
+    return m.group(0) if _not_a_name(m.group(1)) else m.group(1)[0] + "." + m.group(2)
+
+
+def _mask_initials_first(m: re.Match) -> str:
+    initials, word = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+    if _not_a_name(word, m.string[m.end():m.end() + 12]):
+        return m.group(0)
+    return initials + word[0] + "."
+
+
+_ADJECTIVE_END_RE = re.compile(r"(?<!ов)(?<!ев)(?<!ин)(?<!ын)(?:ый|ой|ое|ые|ого|ому|ыми|ых|ий|ая|ей|ую|ими|их|кое)$")  # «Кужахметовой» — фамилия
+_TERM_RE = re.compile(r"(?:Кодекс|Закон|Конституц|Постановлени|Указ|Правил|Положени|Устав|Договор|Протокол|Акт|"
+                      r"Решени|Определени|Заключени|Истец|Ответчик|Жауапкер|Талапкер|Иск|Суд|Республик)", re.I)
+
+
+def _mask_pair(m: re.Match) -> str:
+    before = m.string[max(0, m.start() - 40):m.start()]
+    after = m.string[m.end():m.end() + 12]
+    if _STREET_BEFORE_RE.search(before) or _STREET_AFTER_RE.search(after):
+        return m.group(0)
+    first, second = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+    if re.match(_NOT_NAME + r"\w", first) is None or re.match(_NOT_NAME + r"\w", second) is None:
+        return m.group(0)
+    # Прилагательные и термины: «Налоговый Кодекс», «Гражданский Кодекс», «Поскольку Застройщиком».
+    if any(_not_a_name(w) for w in (first, second)) or _PLACE_AFTER_RE.match(after):
+        return m.group(0)
+    return f"{first[0]}. {second[0]}."
+
+
+_ID_DOC_RE = re.compile(r"((?:удостоверени\w*\s+личности|паспорт\w*|жеке\s+куәлік\w*)\s*(?:№|N)?\s*)\d{6,}", re.I)
+
+
+def mask_document(text: str, parties: list[str] = ()) -> str:
+    """Полный текст решения без персональных данных — для выдачи другим программам (ботам).
+
+    Кроме ФИО (как в mask_text) скрывает фамилию стороны-физлица, упомянутую отдельно («ответчик Петров
+    пояснил»), ИИН, номера счетов, телефоны, почту, номера квартир, даты рождения и номера документов.
+    Названия ОСИ, компаний и госорганов, суммы, даты и номера дел остаются."""
+    text = mask_text(text, parties)
+    for name in parties:
+        if party_kind(name) != PERSON:
+            continue
+        words = re.findall(_NAME_WORD, name)[:3]
+        # Сторона, которую не распознали как организацию («… Астаны», «Қазақстан Республикасы Ішкі …»):
+        # её слова не прячем по всему тексту, иначе пропадут названия городов и органов.
+        if not words or (len(words) < 2 and len(words[0]) < 5) or _NOT_PERSON_WORD_RE.search(name):
+            continue
+        # Каждое слово ФИО отдельно: фамилия без инициалов, имя впереди (казахский порядок), отчество.
+        # Окончание падежа — не длиннее 3 букв: фамилия «Жилин» не должна задеть «Жилищного кодекса».
+        for w in words:
+            if len(w) < 3:
+                continue
+            pattern = rf"\b{_stem(w)}[{_LOW}]{{0,3}}\b" if len(w) > 4 else rf"\b{re.escape(w)}[{_LOW}]{{0,2}}\b"
+            text = re.sub(pattern, f"{w[0]}.", text)
+    text = _WITNESS_RE.sub(lambda m: m.group(1) + _initials(m.group(2)), text)
+    text = _PERSON_PAIR_RE.sub(_mask_pair, text)
+    text = _SURNAME_INITIALS_RE.sub(_mask_surname_initials, text)
+    text = _INITIALS_FIRST_RE.sub(_mask_initials_first, text)
+    text = _IIN_RE.sub("[ИИН]", text)
+    text = _IBAN_RE.sub("[счёт]", text)
+    text = _PHONE_RE.sub("[телефон]", text)
+    text = _EMAIL_RE.sub("[почта]", text)
+    text = _BIRTH_RE.sub("[дата рождения]", text)
+    text = _ID_DOC_RE.sub(lambda m: m.group(1) + "[номер]", text)
+    text = _FLAT_RE.sub(lambda m: (m.group(1) + "[№]") if m.group(1) else "[№] " + m.group(2), text)
+    return text
+
+
 def _parse_money(number: str, fraction: str | None) -> float:
     value = float(re.sub(r"\D", "", number))
     if fraction:

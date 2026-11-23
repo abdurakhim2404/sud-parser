@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 
+from . import acts
 from .analyze import analyze_folders, court_key, court_names
+from .reader import read_text
 from .extract import (
     NO_CONSIDERATION, OSI, PARTIAL, PERSON, REFUSED, SATISFIED, TERMINATED, Decision, display_party,
     party_kind,
@@ -261,8 +263,17 @@ def to_row(d: Decision, meta: Meta, courts: dict[str, str], who: str, rel_file: 
     ]
 
 
-def build(sources: list[tuple[Path, str, str]], out: Path, who: str) -> int:
-    """sources: (папка, категория портала по умолчанию, примечание по умолчанию)."""
+def party_types(d: Decision) -> tuple[list[str], list[str]]:
+    """Тип каждой стороны (для JSON; в реестре — только первой)."""
+    osi_plaintiff = any(party_kind(p) == OSI for p in d.plaintiffs)
+    osi_defendant = any(party_kind(p) == OSI for p in d.defendants)
+    return ([party_type(p, osi_defendant, d.topic) for p in d.plaintiffs],
+            [party_type(p, osi_plaintiff, d.topic, defendant=True, claim=d.claim) for p in d.defendants])
+
+
+def build(sources: list[tuple[Path, str, str]], out: Path, who: str, json_out: Path | None = None) -> int:
+    """sources: (папка, категория портала по умолчанию, примечание по умолчанию).
+    json_out — ещё и судебные акты в JSON для других программ (см. acts.py)."""
     folders = [s[0] for s in sources]
     result = analyze_folders(folders)
     metas: dict[str, Meta] = {}
@@ -272,6 +283,8 @@ def build(sources: list[tuple[Path, str, str]], out: Path, who: str) -> int:
         metas.setdefault(f"__default__{folder}", Meta(default_cat, "", default_note))
     courts = court_names(result.decisions)
     rows = []
+    records: list[dict] = []
+    links = acts.read_links(out / "links.csv")
     many = len(folders) > 1
     for d in result.decisions:
         folder_name, _, file_name = d.file.rpartition("/") if many else ("", "", d.file)
@@ -285,8 +298,15 @@ def build(sources: list[tuple[Path, str, str]], out: Path, who: str) -> int:
             safe_case(d.case_number) + src.suffix.lower())
         (out / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, out / rel)
-        rows.append(to_row(d, meta, courts, who, rel.as_posix()))
+        row = to_row(d, meta, courts, who, rel.as_posix())
+        rows.append(row)
+        if json_out:
+            records.append(acts.to_record(d, dict(zip(COLUMNS, row)), read_text(src), *party_types(d),
+                                          link=links.get(d.case_number, "")))
     rows.sort(key=lambda r: (r[1], r[4], r[3]))
+    if json_out:
+        records.sort(key=lambda r: (r["region"], r["year"], r["case_number"]))
+        acts.write(records, json_out)
     with (out / "registry.csv").open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(COLUMNS)
@@ -305,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="папки с решениями; «папка=категория портала» — категория для папок без _manifest.csv")
     p.add_argument("--out", default="data/registry")
     p.add_argument("--who", default="", help="кто скачал (колонка «Скачал»)")
+    p.add_argument("--json", default="", help="ещё и судебные акты в JSON для ботов, например court_acts.json")
     args = p.parse_args(argv)
     sources = []
     for item in args.folders:
@@ -312,8 +333,8 @@ def main(argv: list[str] | None = None) -> int:
         sources.append((Path(folder), cat, ""))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    n = build(sources, out, args.who)
-    print(f"Строк реестра: {n} -> {out / 'registry.csv'}")
+    n = build(sources, out, args.who, Path(args.json) if args.json else None)
+    print(f"Строк реестра: {n} -> {out / 'registry.csv'}" + (f"; JSON -> {args.json}" if args.json else ""))
     return 0
 
 
