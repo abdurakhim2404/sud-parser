@@ -182,7 +182,7 @@ class Portal:
             res = self.page.evaluate(SET_SELECT_JS, [label, value])
             if res == "ok":
                 break
-            if res.startswith("поле не найдено") and self.field_button(label).count():
+            if self.field_button(label).count() and (res.startswith("поле не найдено") or self.empty_select(label)):
                 self.popup_select(label, value)  # поле — всплывающее окно, а не обычный список
                 return
             if time.time() > deadline:
@@ -191,7 +191,14 @@ class Portal:
         time.sleep(0.8)  # следующие поля (категория, суд) подгружаются после выбора
 
     # Часть полей формы — не <select>, а кнопка со всплывающим списком (как «Категория дела»).
-    POPUP_ITEMS = "[data-radix-popper-content-wrapper] [cmdk-item], [data-radix-popper-content-wrapper] [role=option]"
+    # «Результат рассмотрения» — Radix Select: скрытый <select> пустой, варианты ([role=listbox] [role=option])
+    # появляются только после нажатия на кнопку поля.
+    POPUP_ITEMS = ("[data-radix-popper-content-wrapper] [cmdk-item], [data-radix-popper-content-wrapper] [role=option], "
+                   "[role=listbox] [role=option]")
+
+    def empty_select(self, label: str) -> bool:
+        """Скрытый <select> поля без вариантов — значит, варианты только во всплывающем списке."""
+        return not self.page.evaluate(OPTIONS_JS, label)
 
     def field_button(self, label: str):
         return self.page.locator("form label", has_text=label).locator("xpath=..").locator("button").first
@@ -524,6 +531,17 @@ PIECE_LIMIT = 50
 PIECES_FILE = "_pieces.csv"
 
 
+# Суды, где гражданских дел первой инстанции не бывает: их не перебираем (каждый поиск — запрос к порталу).
+_NOT_CIVIL_COURT_RE = re.compile(
+    r"Верховный|Кассационн|Упразднённ|Упраздненн|административным\s+правонарушениям|следственн|"
+    r"административный\s+суд|^(?!.*Гражданск).*Уголовн|^(?!.*1\s+инстанци).*Апелляционн", re.I)
+
+
+def court_fits(court: str, case_type: str) -> bool:
+    """Нужно ли искать в этом суде: для гражданских дел пропускаем уголовные, административные и вышестоящие суды."""
+    return case_type != "CIVIL" or not _NOT_CIVIL_COURT_RE.search(court)
+
+
 def save_pieces(out: Path, pieces: list[dict]) -> None:
     with (out / PIECES_FILE).open("w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["piece", "found", "listed", "note"])
@@ -542,6 +560,7 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
             try:
                 portal.reset()
                 found = portal.search(args, region=region, court=court, result=result)
+                time.sleep(args.pause / 2)  # портал отвечает 429 на частые поиски
                 break
             except Exception as exc:  # в т.ч. таймауты Playwright: у них свой класс ошибки
                 if "401" in str(exc) or not portal.logged_in():
@@ -569,7 +588,7 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
         if not region:
             sub = [(r, "", result) for r in portal.options("Область")]
         elif not court and portal.options("Судебный орган"):
-            sub = [(region, c, result) for c in portal.options("Судебный орган")]
+            sub = [(region, c, result) for c in portal.options("Судебный орган") if court_fits(c, args.case_type)]
         elif not result:
             sub = [(region, court, r) for r in portal.options("Результат рассмотрения")]
         else:
