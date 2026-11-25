@@ -182,10 +182,62 @@ class Portal:
             res = self.page.evaluate(SET_SELECT_JS, [label, value])
             if res == "ok":
                 break
+            if res.startswith("поле не найдено") and self.field_button(label).count():
+                self.popup_select(label, value)  # поле — всплывающее окно, а не обычный список
+                return
             if time.time() > deadline:
                 raise ValueError(res)
             time.sleep(0.5)
         time.sleep(0.8)  # следующие поля (категория, суд) подгружаются после выбора
+
+    # Часть полей формы — не <select>, а кнопка со всплывающим списком (как «Категория дела»).
+    POPUP_ITEMS = "[data-radix-popper-content-wrapper] [cmdk-item], [data-radix-popper-content-wrapper] [role=option]"
+
+    def field_button(self, label: str):
+        return self.page.locator("form label", has_text=label).locator("xpath=..").locator("button").first
+
+    def popup_options(self, label: str) -> list[str]:
+        if not self.field_button(label).count():
+            return []
+        self.field_button(label).click()
+        items = self.page.locator(self.POPUP_ITEMS)
+        texts: list[str] = []
+        for _ in range(20):
+            time.sleep(0.5)
+            texts = [" ".join(t.split()) for t in items.all_inner_texts()]
+            if texts:
+                break
+        self.page.keyboard.press("Escape")
+        time.sleep(0.5)
+        return [t for t in texts if t and t != "Выберите"]
+
+    def popup_select(self, label: str, value: str) -> None:
+        self.field_button(label).click()
+        items = self.page.locator(self.POPUP_ITEMS)
+        want = " ".join(value.split()).lower()
+        for _ in range(20):
+            time.sleep(0.5)
+            texts = [" ".join(t.split()).lower() for t in items.all_inner_texts()]
+            index = next((i for i, t in enumerate(texts) if t == want), None)
+            if index is None:
+                index = next((i for i, t in enumerate(texts) if want in t), None)
+            if index is not None:
+                items.nth(index).click()
+                time.sleep(0.8)
+                if self.page.locator("[data-radix-popper-content-wrapper]").count():
+                    self.page.keyboard.press("Escape")
+                return
+        self.page.keyboard.press("Escape")
+        raise ValueError(f"нет варианта «{value}» в поле {label}")
+
+    def logged_in(self) -> bool:
+        return bool(self.page.locator("a[href='/cabinet']").count())
+
+    def relogin(self, timeout_min: int = 30) -> None:
+        """Портал завершил сессию (401): ждём, пока человек снова войдёт по ЭЦП, и открываем банк актов."""
+        self.log("!!! Портал завершил сессию. Войдите по ЭЦП заново в окне сборщика — сбор продолжится сам.")
+        self.wait_login(timeout_min)
+        self.open_bank()
 
     def select_category(self, category: str) -> None:
         """«Категория дела» — всплывающее окно с поиском среди ~300 категорий, а не обычный список.
@@ -279,8 +331,8 @@ class Portal:
         raise TimeoutError("Список дел не загрузился")
 
     def options(self, label: str) -> list[str]:
-        """Варианты обычного списка формы (суды, результаты), без пустого «Выберите»."""
-        return self.page.evaluate(OPTIONS_JS, label)
+        """Варианты поля формы (суды, результаты), без пустого «Выберите»: обычный список или всплывающий."""
+        return self.page.evaluate(OPTIONS_JS, label) or self.popup_options(label)
 
     def reset(self) -> None:
         self.button("Сбросить").click()
@@ -415,23 +467,32 @@ def collect(args, log=say) -> int:
                 out.mkdir(parents=True, exist_ok=True)
                 (out / "_query.json").write_text(json.dumps(search_body(job), ensure_ascii=False, indent=2),
                                                  encoding="utf-8")
-                manifest = Manifest(out)
-                if manifest.done:
-                    log(f"Уже скачано раньше: {manifest.saved} дел, они будут пропущены.")
-                try:
-                    if getattr(job, "list_only", False):
-                        list_results(portal, out, job)
-                    elif job.category:  # с категорией портал листает только 5 страниц — делим поиск
-                        download_by_pieces(portal, manifest, out, job)
-                    else:
-                        log(f"Портал нашёл дел: {portal.search(job)}")
-                        walk_results(portal, manifest, out, job)
-                except (RuntimeError, TimeoutError, ValueError) as exc:
-                    log(f"Остановлено: {exc}. Повторный запуск продолжит с этого места.")
-                    portal.debug_snapshot("stopped")
-                    if len(todo) == 1:
+                for attempt in range(3):  # при обрыве сессии — вход заново и та же выборка (журнал пропустит скачанное)
+                    manifest = Manifest(out)
+                    if manifest.done:
+                        log(f"Уже скачано раньше: {manifest.saved} дел, они будут пропущены.")
+                    try:
+                        if getattr(job, "list_only", False):
+                            list_results(portal, out, job)
+                        elif job.category:  # с категорией портал листает только 5 страниц — делим поиск
+                            download_by_pieces(portal, manifest, out, job)
+                        else:
+                            log(f"Портал нашёл дел: {portal.search(job)}")
+                            walk_results(portal, manifest, out, job)
                         break
-                    portal.open_bank_again()  # следующая категория
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 — сбой портала не должен ронять весь сбор
+                        log(f"Остановлено: {str(exc).splitlines()[0][:160]}")
+                        portal.debug_snapshot("stopped")
+                        try:
+                            if not portal.logged_in():
+                                portal.relogin()
+                            else:
+                                portal.open_bank_again()
+                        except Exception as exc2:  # noqa: BLE001
+                            log(f"Не удалось вернуться к поиску: {str(exc2).splitlines()[0][:160]}")
+                            raise
                 log(f"Готово: дел с решениями {manifest.saved}. Папка: {out.resolve()}")
         except KeyboardInterrupt:
             log("Остановлено. Повторный запуск продолжит с этого места.")
@@ -482,11 +543,18 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
                 portal.reset()
                 found = portal.search(args, region=region, court=court, result=result)
                 break
-            except (TimeoutError, PortalStuck) as exc:
+            except Exception as exc:  # в т.ч. таймауты Playwright: у них свой класс ошибки
+                if "401" in str(exc) or not portal.logged_in():
+                    portal.relogin()
+                    continue
                 wait = 30 * (attempt + 1)
-                portal.log(f"  {label}: поиск не загрузился ({exc}); жду {wait} с")
+                portal.log(f"  {label}: поиск не загрузился ({str(exc).splitlines()[0][:120]}); жду {wait} с")
                 time.sleep(wait)
-                portal.open_bank_again()
+                try:
+                    portal.open_bank_again()
+                except Exception:
+                    if not portal.logged_in():
+                        portal.relogin()
         if found is None:
             pieces.append({"piece": label, "found": "", "listed": 0, "note": "поиск не загрузился"})
             on_change()
@@ -507,6 +575,7 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
         else:
             sub = []
         if not sub:  # делить больше не на что: берём первые 50
+            portal.debug_snapshot("no-split")  # чтобы разобраться, почему не разделилось
             got = handle(label, PIECE_LIMIT)
             pieces.append({"piece": label, "found": found, "listed": got, "note": "больше 50, взяты первые 50"})
             portal.log(f"  {label}: найдено {found}, делить дальше нечем — взяты первые {got}")
