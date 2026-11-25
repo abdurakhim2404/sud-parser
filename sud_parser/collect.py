@@ -532,6 +532,7 @@ def list_row(cells: list[str], page: int) -> dict:
 # сбрасывает результаты. Поэтому большой запрос делим на части: область -> суд -> результат.
 PIECE_LIMIT = 50
 PIECES_FILE = "_pieces.csv"
+UNFILTERED_MAX = 400  # больше — листать без категории слишком долго (40+ страниц), берём первые 50
 
 
 # Суды, где гражданских дел первой инстанции не бывает: их не перебираем (каждый поиск — запрос к порталу).
@@ -722,6 +723,12 @@ def download_by_pieces(portal: Portal, manifest: Manifest, out: Path, args) -> N
         portal.reset()
         total = portal.search(job, region=region, court=court, result="")
         time.sleep(args.pause)
+        if total > UNFILTERED_MAX:  # без категории поиск по словам почти ничего не отсеивает (потолок портала 10000)
+            portal.log(f"  {label}: без категории найдено {total} — слишком много; беру первые 50 с категорией")
+            portal.reset()
+            portal.search(args, region=region, court=court, result="")
+            time.sleep(args.pause)
+            return take(label, PIECE_LIMIT)
         portal.log(f"  {label}: без категории найдено {total}, отбираю «{portal.category_text[:60]}…»")
         taken, page_no = 0, 1
         while True:
