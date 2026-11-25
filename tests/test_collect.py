@@ -64,3 +64,17 @@ def test_analyzer_skips_collector_files(tmp_path):
     for name in ("_manifest.csv", "_query.json", "~$temp.docx", "1_1.txt"):
         (tmp_path / name).write_text("x", encoding="utf-8")
     assert [p.name for p in list_files(tmp_path)] == ["1_1.txt"]
+
+
+def test_jobs_by_categories_and_years():
+    from sud_parser.collect import jobs
+    from sud_parser.categories import CATEGORIES, DEFAULT_ORDER
+    args = Namespace(categories="47,2272", years=[2025, 2026], out="data/collected/categories", category="",
+                     case_type="CIVIL", year=2025, region="", result="", keywords="x", limit=10, list_only=False)
+    todo = jobs(args)
+    assert [Path(j.out).name for j, _ in todo] == ["47_2025", "47_2026", "2272_2025", "2272_2026"]
+    assert todo[0][0].category == CATEGORIES["47"].portal and todo[1][0].year == 2026
+    assert args.category == ""  # исходные настройки не меняются
+    assert set(DEFAULT_ORDER) == set(CATEGORIES)
+    single = Namespace(**{**vars(args), "categories": ""})
+    assert jobs(single) == [(single, "")]

@@ -213,6 +213,20 @@ class Portal:
             self.page.keyboard.press("Escape")  # если окно позволяет выбрать несколько, закрываем его
         self.log(f"Категория: {texts[index]}")
 
+    def all_categories(self) -> list[str]:
+        """Все категории из всплывающего окна (для сверки с categories.py)."""
+        self.advanced_open()
+        self.page.locator("form label", has_text="Категория дела").locator("xpath=..").locator("button").first.click()
+        options = self.page.locator("[data-radix-popper-content-wrapper] [cmdk-item]")
+        texts: list[str] = []
+        for _ in range(20):  # список подгружается не сразу
+            time.sleep(1)
+            texts = [" ".join(t.split()) for t in options.all_inner_texts()]
+            if len(texts) > 50:
+                break
+        self.page.keyboard.press("Escape")
+        return texts
+
     def advanced_open(self) -> None:
         """Раскрыть «Расширенный поиск», если он свёрнут (кнопка работает как переключатель)."""
         if not self.page.locator("form label", has_text="Область").first.is_visible():
@@ -354,16 +368,29 @@ def say(message: str) -> None:
     print(message, flush=True)  # сразу, а не в конце: прогон идёт долго
 
 
+def jobs(args) -> list[tuple[argparse.Namespace, str]]:
+    """Что собирать: одна выборка или категории реестра × годы — каждая в свою папку."""
+    if not getattr(args, "categories", ""):
+        return [(args, "")]
+    from .categories import CATEGORIES, DEFAULT_ORDER
+    out = []
+    ids = DEFAULT_ORDER if args.categories == "all" else [c.strip() for c in args.categories.split(",") if c.strip()]
+    for cid in ids:
+        if cid not in CATEGORIES:
+            raise SystemExit(f"Нет категории с ID {cid} в sud_parser/categories.py")
+        cat = CATEGORIES[cid]
+        for year in args.years:
+            job = argparse.Namespace(**vars(args))
+            job.category, job.case_type, job.year = cat.portal, cat.case_type, year
+            job.out = str(Path(args.out) / f"{cid}_{year}")
+            out.append((job, f"[{cid} · {year}] {cat.name}"))
+    return out
+
+
 def collect(args, log=say) -> int:
     from playwright.sync_api import sync_playwright
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "_query.json").write_text(json.dumps(search_body(args), ensure_ascii=False, indent=2), encoding="utf-8")
-    manifest = Manifest(out)
-    if manifest.done:
-        log(f"Уже скачано раньше: {manifest.saved} дел, они будут пропущены.")
-
+    todo = jobs(args)
     with sync_playwright() as pw:
         ctx = pw.chromium.launch_persistent_context(
             str(PROFILE_DIR), channel="chrome", headless=False, accept_downloads=True,
@@ -371,21 +398,47 @@ def collect(args, log=say) -> int:
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         portal = Portal(page, args.pause, log)
         try:
-            portal.wait_login(args.login_wait)
+            portal.wait_login(args.login_wait)  # один вход по ЭЦП на все категории
             portal.open_bank()
-            log(f"Портал нашёл дел: {portal.search(args)}")
-            if getattr(args, "list_only", False):
-                list_results(portal, out, args)
-            else:
-                walk_results(portal, manifest, out, args)
+            if getattr(args, "show_categories", False):
+                texts = portal.all_categories()
+                path = Path("data/collected/portal_categories.txt")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("\n".join(texts), encoding="utf-8")
+                log(f"Категорий на портале: {len(texts)} -> {path}")
+                if not getattr(args, "categories", ""):
+                    todo = []
+            for n, (job, title) in enumerate(todo, 1):
+                if title:
+                    log(f"=== {n}/{len(todo)} {title}")
+                out = Path(job.out)
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "_query.json").write_text(json.dumps(search_body(job), ensure_ascii=False, indent=2),
+                                                 encoding="utf-8")
+                manifest = Manifest(out)
+                if manifest.done:
+                    log(f"Уже скачано раньше: {manifest.saved} дел, они будут пропущены.")
+                try:
+                    if getattr(job, "list_only", False):
+                        list_results(portal, out, job)
+                    elif job.category:  # с категорией портал листает только 5 страниц — делим поиск
+                        download_by_pieces(portal, manifest, out, job)
+                    else:
+                        log(f"Портал нашёл дел: {portal.search(job)}")
+                        walk_results(portal, manifest, out, job)
+                except (RuntimeError, TimeoutError, ValueError) as exc:
+                    log(f"Остановлено: {exc}. Повторный запуск продолжит с этого места.")
+                    portal.debug_snapshot("stopped")
+                    if len(todo) == 1:
+                        break
+                    portal.open_bank_again()  # следующая категория
+                log(f"Готово: дел с решениями {manifest.saved}. Папка: {out.resolve()}")
         except KeyboardInterrupt:
             log("Остановлено. Повторный запуск продолжит с этого места.")
         except (RuntimeError, TimeoutError, ValueError) as exc:
             log(f"Остановлено: {exc}. Повторный запуск продолжит с этого места.")
         finally:
             ctx.close()
-    log(f"Готово: дел с решениями {manifest.saved}. Папка: {out.resolve()}")
-    log(f"Анализ: python -m sud_parser.practice --dir \"{out.resolve()}\"")
     return 0
 
 
@@ -410,6 +463,62 @@ PIECE_LIMIT = 50
 PIECES_FILE = "_pieces.csv"
 
 
+def save_pieces(out: Path, pieces: list[dict]) -> None:
+    with (out / PIECES_FILE).open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["piece", "found", "listed", "note"])
+        w.writeheader()
+        w.writerows(pieces)
+
+
+def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lambda: None) -> None:
+    """Искать по частям до 50 дел (область -> суд -> результат) и для каждой части вызвать
+    handle(label, found) -> сколько дел из неё взято. Части записываются в pieces."""
+
+    def piece(region: str, court: str, result: str) -> None:
+        label = " / ".join(x for x in (region, court, result) if x) or "весь запрос"
+        found = None
+        for attempt in range(3):
+            try:
+                portal.reset()
+                found = portal.search(args, region=region, court=court, result=result)
+                break
+            except (TimeoutError, PortalStuck) as exc:
+                wait = 30 * (attempt + 1)
+                portal.log(f"  {label}: поиск не загрузился ({exc}); жду {wait} с")
+                time.sleep(wait)
+                portal.open_bank_again()
+        if found is None:
+            pieces.append({"piece": label, "found": "", "listed": 0, "note": "поиск не загрузился"})
+            on_change()
+            return
+        if found <= PIECE_LIMIT:
+            got = handle(label, found) if found else 0
+            pieces.append({"piece": label, "found": found, "listed": got, "note": ""})
+            portal.log(f"  {label}: найдено {found}, взято {got}")
+            on_change()
+            return
+        # Больше 50: делим на следующем уровне.
+        if not region:
+            sub = [(r, "", result) for r in portal.options("Область")]
+        elif not court and portal.options("Судебный орган"):
+            sub = [(region, c, result) for c in portal.options("Судебный орган")]
+        elif not result:
+            sub = [(region, court, r) for r in portal.options("Результат рассмотрения")]
+        else:
+            sub = []
+        if not sub:  # делить больше не на что: берём первые 50
+            got = handle(label, PIECE_LIMIT)
+            pieces.append({"piece": label, "found": found, "listed": got, "note": "больше 50, взяты первые 50"})
+            portal.log(f"  {label}: найдено {found}, делить дальше нечем — взяты первые {got}")
+            on_change()
+            return
+        portal.log(f"  {label}: найдено {found} — делю на {len(sub)} частей")
+        for r, c, res in sub:
+            piece(r, c, res)
+
+    piece(args.region, "", args.result)
+
+
 def list_results(portal: Portal, out: Path, args) -> list[dict]:
     """Только список дел выдачи (без открытия дел и скачивания), с делением запроса на части по 50 дел."""
     rows: dict[str, dict] = {}
@@ -420,12 +529,9 @@ def list_results(portal: Portal, out: Path, args) -> list[dict]:
             w = csv.DictWriter(f, fieldnames=LIST_FIELDS + ["piece"])
             w.writeheader()
             w.writerows(rows.values())
-        with (out / PIECES_FILE).open("w", encoding="utf-8-sig", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=["piece", "found", "listed", "note"])
-            w.writeheader()
-            w.writerows(pieces)
+        save_pieces(out, pieces)
 
-    def take_pages(label: str) -> int:
+    def take_pages(label: str, found: int = PIECE_LIMIT) -> int:
         before = len(rows)
         page_no = 1
         while True:
@@ -447,49 +553,7 @@ def list_results(portal: Portal, out: Path, args) -> list[dict]:
             time.sleep(args.pause / 2)
         return len(rows) - before
 
-    def piece(region: str, court: str, result: str) -> None:
-        label = " / ".join(x for x in (region, court, result) if x) or "весь запрос"
-        found = None
-        for attempt in range(3):
-            try:
-                portal.reset()
-                found = portal.search(args, region=region, court=court, result=result)
-                break
-            except (TimeoutError, PortalStuck) as exc:
-                wait = 30 * (attempt + 1)
-                portal.log(f"  {label}: поиск не загрузился ({exc}); жду {wait} с")
-                time.sleep(wait)
-                portal.open_bank_again()
-        if found is None:
-            pieces.append({"piece": label, "found": "", "listed": 0, "note": "поиск не загрузился"})
-            save()
-            return
-        if found <= PIECE_LIMIT:
-            got = take_pages(label) if found else 0
-            pieces.append({"piece": label, "found": found, "listed": got, "note": ""})
-            portal.log(f"  {label}: найдено {found}, в списке {got}; всего {len(rows)}")
-            save()
-            return
-        # Больше 50: делим на следующем уровне.
-        if not region:
-            sub = [(r, "", result) for r in portal.options("Область")]
-        elif not court and portal.options("Судебный орган"):
-            sub = [(region, c, result) for c in portal.options("Судебный орган")]
-        elif not result:
-            sub = [(region, court, r) for r in portal.options("Результат рассмотрения")]
-        else:
-            sub = []
-        if not sub:  # делить больше не на что: берём первые 50
-            got = take_pages(label)
-            pieces.append({"piece": label, "found": found, "listed": got, "note": "больше 50, взяты первые 50"})
-            portal.log(f"  {label}: найдено {found}, делить дальше нечем — взяты первые {got}")
-            save()
-            return
-        portal.log(f"  {label}: найдено {found} — делю на {len(sub)} частей")
-        for r, c, res in sub:
-            piece(r, c, res)
-
-    piece(args.region, "", args.result)
+    split_search(portal, args, take_pages, pieces, save)
     found_sum = sum(int(p["found"] or 0) for p in pieces if not p["note"] or p["note"].startswith("больше"))
     portal.log(f"Список: {len(rows)} дел (по частям найдено {found_sum}) -> {out / LIST_FILE}")
     return list(rows.values())
@@ -514,6 +578,44 @@ def walk_results(portal: Portal, manifest: Manifest, out: Path, args) -> None:
         if manifest.saved >= args.limit or not portal.next_page(rows[0].case_number if rows else ""):
             break
         page_no += 1
+
+
+def download_by_pieces(portal: Portal, manifest: Manifest, out: Path, args) -> None:
+    """Скачать решения всей выдачи, деля поиск на части до 50 дел (обход сброса портала на 6-й странице)."""
+    pieces: list[dict] = []
+
+    def take(label: str, found: int) -> int:
+        taken, page_no = 0, 1
+        while True:
+            rows = portal.rows()
+            for i, row in enumerate(rows):
+                if manifest.saved >= args.limit:
+                    return taken
+                if row.case_number in manifest.done:
+                    continue
+                try:
+                    status, files = fetch_case(portal, i, row, out, args)
+                except RuntimeError as exc:  # портал вернул не ту страницу: эту часть доберём при повторном запуске
+                    portal.log(f"  {label}: {exc}; часть прервана")
+                    return taken
+                manifest.add(row, page_no, status, files)
+                portal.log(f"  {row.case_number}: {status}" + (f" ({len(files)} файл.)" if files else ""))
+                taken += status == "ok"
+                portal.back_to_list()
+                time.sleep(args.pause)
+            if page_no * 10 >= min(found, PIECE_LIMIT):
+                return taken
+            try:
+                if not portal.next_page(rows[0].case_number if rows else ""):
+                    return taken
+            except PortalStuck as exc:
+                portal.log(f"  {label}: страница {page_no + 1} не открылась ({exc})")
+                return taken
+            page_no += 1
+
+    split_search(portal, args, take, pieces, lambda: save_pieces(out, pieces))
+    found_sum = sum(int(p["found"] or 0) for p in pieces if not p["note"] or p["note"].startswith("больше"))
+    portal.log(f"Найдено по частям: {found_sum}; дел с решениями в папке: {manifest.saved}")
 
 
 def fetch_case(portal: Portal, index: int, row: Row, out: Path, args) -> tuple[str, list[str]]:
@@ -557,23 +659,33 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(prog="sud_parser.collect", description="Скачать решения из Банка судебных актов")
-    p.add_argument("--keywords", required=True, help="слова для поиска, как в поле «Поиск по ключевому слову»")
+    p.add_argument("--keywords", default="объединение собственников имущества",
+                   help="слова для поиска, как в поле «Поиск по ключевому слову»")
     p.add_argument("--year", type=int, default=datetime.now().year, help="учетный год")
     p.add_argument("--case-type", default="CIVIL", help="CIVIL (гражданские), APPK (административные) и т. п.")
     p.add_argument("--region", default="", help="область как на портале, например «город Астана»")
     p.add_argument("--result", default="", help="результат рассмотрения как на портале")
     p.add_argument("--category", default="", help="категория дела как на портале (можно часть названия)")
+    p.add_argument("--categories", default="",
+                   help="ID категорий реестра через запятую (sud_parser/categories.py), например 47,2272")
+    p.add_argument("--years", default="", help="годы для --categories, например 2025,2026")
+    p.add_argument("--show-categories", action="store_true",
+                   help="только выписать все категории портала в data/collected/portal_categories.txt")
     p.add_argument("--list-only", action="store_true",
                    help="только список дел выдачи (_list.csv), без скачивания решений")
-    p.add_argument("--limit", type=int, default=50, help="сколько дел с решениями скачать")
+    p.add_argument("--limit", type=int, default=None,
+                   help="сколько дел с решениями скачать (по умолчанию 50; с --categories — все)")
     p.add_argument("--max-pages", type=int, default=200)
     p.add_argument("--pause", type=float, default=4.0, help="пауза между делами, секунд")
     p.add_argument("--login-wait", type=int, default=10, help="сколько минут ждать входа по ЭЦП")
     p.add_argument("--out", default="", help="папка для решений (по умолчанию data/collected/<дата>)")
     args = p.parse_args(argv)
     args.case_type = CASE_TYPES.get(args.case_type.lower(), args.case_type)
+    args.years = [int(y) for y in args.years.split(",") if y.strip()] or [args.year]
+    if args.limit is None:  # по категориям — всё, что найдётся; иначе первые 50 дел
+        args.limit = 10**9 if args.categories else 50
     if not args.out:
-        args.out = str(Path("data/collected") / f"{datetime.now():%Y-%m-%d_%H-%M}")
+        args.out = str(Path("data/collected") / ("categories" if args.categories else f"{datetime.now():%Y-%m-%d_%H-%M}"))
     return collect(args)
 
 
