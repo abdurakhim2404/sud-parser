@@ -197,6 +197,15 @@ class Portal:
     POPUP_ITEMS = ("[data-radix-popper-content-wrapper] [cmdk-item], [data-radix-popper-content-wrapper] [role=option], "
                    "[role=listbox] [role=option]")
 
+    def wait_options(self, label: str, timeout: float = 20) -> list[str]:
+        """Варианты обычного списка, которые портал подгружает после выбора области (суды): ждём их."""
+        deadline = time.time() + timeout
+        while True:
+            opts = self.page.evaluate(OPTIONS_JS, label)
+            if opts or time.time() > deadline:
+                return opts
+            time.sleep(1)
+
     def empty_select(self, label: str) -> bool:
         """Скрытый <select> поля без вариантов — значит, варианты только во всплывающем списке."""
         return not self.page.evaluate(OPTIONS_JS, label)
@@ -592,12 +601,18 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
         # Больше 50: делим на следующем уровне.
         if not region:
             sub = [(r, "", result) for r in portal.options("Область")]
-        elif not court and portal.options("Судебный орган"):
-            sub = [(region, c, result) for c in portal.options("Судебный орган") if court_fits(c, args.case_type)]
+        elif not court and portal.wait_options("Судебный орган"):
+            sub = [(region, c, result) for c in portal.wait_options("Судебный орган") if court_fits(c, args.case_type)]
         elif not result:
             sub = [(region, court, r) for r in portal.options("Результат рассмотрения")]
         else:
             sub = []
+        if not sub and not court:  # область без списка судов: не берём «первые 50» молча — это сбой загрузки
+            portal.debug_snapshot("no-courts")
+            pieces.append({"piece": label, "found": found, "listed": 0, "note": "список судов не загрузился"})
+            portal.log(f"  {label}: найдено {found}, но список судов не загрузился — пропускаю, доберу повторным запуском")
+            on_change()
+            return
         if not sub and unfiltered is not None and getattr(args, "category", ""):
             # «Результат рассмотрения» на портале пустой, делить нечем. Но 5 страниц — ограничение только
             # для поиска с категорией: ищем без неё и берём дела нужной категории по колонке выдачи.
