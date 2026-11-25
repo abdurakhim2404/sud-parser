@@ -138,6 +138,7 @@ class Portal:
         self.pause = pause
         self.log = log
         self.page_wait = page_wait  # сколько ждать смены страницы после «вперёд»
+        self.category_text = ""     # полное название выбранной категории, как на портале
 
     def button(self, text: str):
         return self.page.get_by_role("button", name=text, exact=True)
@@ -270,7 +271,9 @@ class Portal:
         time.sleep(0.8)
         if self.page.locator("[data-radix-popper-content-wrapper]").count():
             self.page.keyboard.press("Escape")  # если окно позволяет выбрать несколько, закрываем его
-        self.log(f"Категория: {texts[index]}")
+        if texts[index] != self.category_text:
+            self.log(f"Категория: {texts[index]}")
+        self.category_text = texts[index]  # так же она записана в колонке «Категория» выдачи
 
     def all_categories(self) -> list[str]:
         """Все категории из всплывающего окна (для сверки с categories.py)."""
@@ -549,9 +552,10 @@ def save_pieces(out: Path, pieces: list[dict]) -> None:
         w.writerows(pieces)
 
 
-def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lambda: None) -> None:
+def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lambda: None, unfiltered=None) -> None:
     """Искать по частям до 50 дел (область -> суд -> результат) и для каждой части вызвать
-    handle(label, found) -> сколько дел из неё взято. Части записываются в pieces."""
+    handle(label, found) -> сколько дел из неё взято. Части записываются в pieces.
+    unfiltered(label, region, court) — если часть больше 50 и делить нечем (см. ниже)."""
 
     def piece(region: str, court: str, result: str) -> None:
         label = " / ".join(x for x in (region, court, result) if x) or "весь запрос"
@@ -560,7 +564,7 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
             try:
                 portal.reset()
                 found = portal.search(args, region=region, court=court, result=result)
-                time.sleep(args.pause / 2)  # портал отвечает 429 на частые поиски
+                time.sleep(args.pause)  # портал отвечает 429 на частые поиски
                 break
             except Exception as exc:  # в т.ч. таймауты Playwright: у них свой класс ошибки
                 if "401" in str(exc) or not portal.logged_in():
@@ -593,6 +597,14 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
             sub = [(region, court, r) for r in portal.options("Результат рассмотрения")]
         else:
             sub = []
+        if not sub and unfiltered is not None and getattr(args, "category", ""):
+            # «Результат рассмотрения» на портале пустой, делить нечем. Но 5 страниц — ограничение только
+            # для поиска с категорией: ищем без неё и берём дела нужной категории по колонке выдачи.
+            got = unfiltered(label, region, court)
+            pieces.append({"piece": label, "found": found, "listed": got, "note": "больше 50: без категории, отбор по колонке"})
+            portal.log(f"  {label}: найдено {found}, поиск без категории — взято {got}")
+            on_change()
+            return
         if not sub:  # делить больше не на что: берём первые 50
             portal.debug_snapshot("no-split")  # чтобы разобраться, почему не разделилось
             got = handle(label, PIECE_LIMIT)
@@ -701,7 +713,47 @@ def download_by_pieces(portal: Portal, manifest: Manifest, out: Path, args) -> N
                 return taken
             page_no += 1
 
-    split_search(portal, args, take, pieces, lambda: save_pieces(out, pieces))
+    def take_without_category(label: str, region: str, court: str) -> int:
+        """Суд с >50 делами категории: ищем без категории (так портал листает все страницы) и скачиваем
+        только строки, где в колонке «Категория» стоит выбранная категория."""
+        want = " ".join(portal.category_text.split()).lower()
+        job = argparse.Namespace(**vars(args))
+        job.category = ""
+        portal.reset()
+        total = portal.search(job, region=region, court=court, result="")
+        time.sleep(args.pause)
+        portal.log(f"  {label}: без категории найдено {total}, отбираю «{portal.category_text[:60]}…»")
+        taken, page_no = 0, 1
+        while True:
+            rows = portal.rows()
+            for i, row in enumerate(rows):
+                if manifest.saved >= args.limit:
+                    return taken
+                if " ".join(row.category.split()).lower() != want or row.case_number in manifest.done:
+                    continue
+                try:
+                    status, files = fetch_case(portal, i, row, out, args)
+                except RuntimeError as exc:
+                    portal.log(f"  {label}: {exc}; часть прервана")
+                    return taken
+                manifest.add(row, page_no, status, files)
+                portal.log(f"  {row.case_number}: {status}" + (f" ({len(files)} файл.)" if files else ""))
+                taken += status == "ok"
+                portal.back_to_list()
+                time.sleep(args.pause)
+            if page_no * 10 >= total:
+                return taken
+            try:
+                if not portal.next_page(rows[0].case_number if rows else ""):
+                    portal.log(f"  {label}: страница {page_no + 1} не открылась")
+                    return taken
+            except PortalStuck as exc:
+                portal.log(f"  {label}: страница {page_no + 1} не открылась ({exc})")
+                return taken
+            page_no += 1
+            time.sleep(args.pause / 2)
+
+    split_search(portal, args, take, pieces, lambda: save_pieces(out, pieces), take_without_category)
     found_sum = sum(int(p["found"] or 0) for p in pieces if not p["note"] or p["note"].startswith("больше"))
     portal.log(f"Найдено по частям: {found_sum}; дел с решениями в папке: {manifest.saved}")
 
