@@ -562,13 +562,49 @@ def save_pieces(out: Path, pieces: list[dict]) -> None:
         w.writerows(pieces)
 
 
-def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lambda: None, unfiltered=None) -> None:
+DONE_PIECES_FILE = "_done_pieces.txt"
+
+
+class DonePieces:
+    """Части поиска (область, суд), пройденные целиком: после перезапуска их не ищем заново."""
+
+    def __init__(self, out: Path | None):
+        self.path = out / DONE_PIECES_FILE if out else None
+        self.labels: set[str] = set()
+        if self.path and self.path.exists():
+            self.labels = {l for l in self.path.read_text(encoding="utf-8").splitlines() if l}
+
+    def __contains__(self, label: str) -> bool:
+        return label in self.labels
+
+    def add(self, label: str) -> None:
+        if label in self.labels:
+            return
+        self.labels.add(label)
+        if self.path:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(label + "\n")
+
+
+def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lambda: None, unfiltered=None,
+                 done: DonePieces | None = None, complete=lambda: True) -> None:
     """Искать по частям до 50 дел (область -> суд -> результат) и для каждой части вызвать
     handle(label, found) -> сколько дел из неё взято. Части записываются в pieces.
-    unfiltered(label, region, court) — если часть больше 50 и делить нечем (см. ниже)."""
+    unfiltered(label, region, court) — если часть больше 50 и делить нечем (см. ниже).
+    done — пройденные части (их пропускаем); complete() — прошёл ли последний handle без сбоев."""
+    done = done if done is not None else DonePieces(None)
 
-    def piece(region: str, court: str, result: str) -> None:
+    def piece(region: str, court: str, result: str) -> bool:
+        """True — часть пройдена целиком."""
         label = " / ".join(x for x in (region, court, result) if x) or "весь запрос"
+        if label in done:
+            return True
+        ok = piece_body(region, court, result, label)
+        if ok:
+            done.add(label)
+        return ok
+
+    def piece_body(region: str, court: str, result: str, label: str) -> bool:
         found = None
         for attempt in range(3):
             try:
@@ -591,13 +627,13 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
         if found is None:
             pieces.append({"piece": label, "found": "", "listed": 0, "note": "поиск не загрузился"})
             on_change()
-            return
+            return False
         if found <= PIECE_LIMIT:
             got = handle(label, found) if found else 0
             pieces.append({"piece": label, "found": found, "listed": got, "note": ""})
             portal.log(f"  {label}: найдено {found}, взято {got}")
             on_change()
-            return
+            return not found or complete()
         # Больше 50: делим на следующем уровне.
         if not region:
             sub = [(r, "", result) for r in portal.options("Область")]
@@ -612,7 +648,7 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
             pieces.append({"piece": label, "found": found, "listed": 0, "note": "список судов не загрузился"})
             portal.log(f"  {label}: найдено {found}, но список судов не загрузился — пропускаю, доберу повторным запуском")
             on_change()
-            return
+            return False
         if not sub and unfiltered is not None and getattr(args, "category", ""):
             # «Результат рассмотрения» на портале пустой, делить нечем. Но 5 страниц — ограничение только
             # для поиска с категорией: ищем без неё и берём дела нужной категории по колонке выдачи.
@@ -620,17 +656,17 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
             pieces.append({"piece": label, "found": found, "listed": got, "note": "больше 50: без категории, отбор по колонке"})
             portal.log(f"  {label}: найдено {found}, поиск без категории — взято {got}")
             on_change()
-            return
+            return complete()
         if not sub:  # делить больше не на что: берём первые 50
             portal.debug_snapshot("no-split")  # чтобы разобраться, почему не разделилось
             got = handle(label, PIECE_LIMIT)
             pieces.append({"piece": label, "found": found, "listed": got, "note": "больше 50, взяты первые 50"})
             portal.log(f"  {label}: найдено {found}, делить дальше нечем — взяты первые {got}")
             on_change()
-            return
+            return complete()
         portal.log(f"  {label}: найдено {found} — делю на {len(sub)} частей")
-        for r, c, res in sub:
-            piece(r, c, res)
+        results = [piece(r, c, res) for r, c, res in sub]  # все части, даже если какая-то не удалась
+        return all(results)
 
     piece(args.region, "", args.result)
 
@@ -699,34 +735,42 @@ def walk_results(portal: Portal, manifest: Manifest, out: Path, args) -> None:
 def download_by_pieces(portal: Portal, manifest: Manifest, out: Path, args) -> None:
     """Скачать решения всей выдачи, деля поиск на части до 50 дел (обход сброса портала на 6-й странице)."""
     pieces: list[dict] = []
+    state = {"complete": True}  # прошла ли последняя часть без сбоев (тогда её не повторяем после перезапуска)
+
+    def fail(taken: int) -> int:
+        state["complete"] = False
+        return taken
 
     def take(label: str, found: int) -> int:
+        state["complete"] = True
         taken, page_no = 0, 1
         while True:
             rows = portal.rows()
             for i, row in enumerate(rows):
                 if manifest.saved >= args.limit:
-                    return taken
+                    return fail(taken)
                 if row.case_number in manifest.done:
                     continue
                 try:
                     status, files = fetch_case(portal, i, row, out, args)
                 except RuntimeError as exc:  # портал вернул не ту страницу: эту часть доберём при повторном запуске
                     portal.log(f"  {label}: {exc}; часть прервана")
-                    return taken
+                    return fail(taken)
                 manifest.add(row, page_no, status, files)
                 portal.log(f"  {row.case_number}: {status}" + (f" ({len(files)} файл.)" if files else ""))
                 taken += status == "ok"
+                if status not in ("ok", "нет решений"):  # не открылось / не скачалось — часть пройдём ещё раз
+                    state["complete"] = False
                 portal.back_to_list()
                 time.sleep(args.pause)
             if page_no * 10 >= min(found, PIECE_LIMIT):
                 return taken
             try:
                 if not portal.next_page(rows[0].case_number if rows else ""):
-                    return taken
+                    return fail(taken)
             except PortalStuck as exc:
                 portal.log(f"  {label}: страница {page_no + 1} не открылась ({exc})")
-                return taken
+                return fail(taken)
             page_no += 1
 
     def take_without_category(label: str, region: str, court: str) -> int:
@@ -745,22 +789,25 @@ def download_by_pieces(portal: Portal, manifest: Manifest, out: Path, args) -> N
             time.sleep(args.pause)
             return take(label, PIECE_LIMIT)
         portal.log(f"  {label}: без категории найдено {total}, отбираю «{portal.category_text[:60]}…»")
+        state["complete"] = True
         taken, page_no = 0, 1
         while True:
             rows = portal.rows()
             for i, row in enumerate(rows):
                 if manifest.saved >= args.limit:
-                    return taken
+                    return fail(taken)
                 if " ".join(row.category.split()).lower() != want or row.case_number in manifest.done:
                     continue
                 try:
                     status, files = fetch_case(portal, i, row, out, args)
                 except RuntimeError as exc:
                     portal.log(f"  {label}: {exc}; часть прервана")
-                    return taken
+                    return fail(taken)
                 manifest.add(row, page_no, status, files)
                 portal.log(f"  {row.case_number}: {status}" + (f" ({len(files)} файл.)" if files else ""))
                 taken += status == "ok"
+                if status not in ("ok", "нет решений"):
+                    state["complete"] = False
                 portal.back_to_list()
                 time.sleep(args.pause)
             if page_no * 10 >= total:
@@ -768,14 +815,15 @@ def download_by_pieces(portal: Portal, manifest: Manifest, out: Path, args) -> N
             try:
                 if not portal.next_page(rows[0].case_number if rows else ""):
                     portal.log(f"  {label}: страница {page_no + 1} не открылась")
-                    return taken
+                    return fail(taken)
             except PortalStuck as exc:
                 portal.log(f"  {label}: страница {page_no + 1} не открылась ({exc})")
-                return taken
+                return fail(taken)
             page_no += 1
             time.sleep(args.pause / 2)
 
-    split_search(portal, args, take, pieces, lambda: save_pieces(out, pieces), take_without_category)
+    split_search(portal, args, take, pieces, lambda: save_pieces(out, pieces), take_without_category,
+                 done=DonePieces(out), complete=lambda: state["complete"])
     found_sum = sum(int(p["found"] or 0) for p in pieces if not p["note"] or p["note"].startswith("больше"))
     portal.log(f"Найдено по частям: {found_sum}; дел с решениями в папке: {manifest.saved}")
 

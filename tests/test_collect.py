@@ -96,3 +96,57 @@ def test_jobs_by_categories_and_years():
 def test_court_fits(court, fits):
     from sud_parser.collect import court_fits
     assert court_fits(court, "CIVIL") is fits
+
+
+class _FakeSplitPortal:
+    """Портал для split_search: 120 дел -> 2 области -> суды по 60 и 30 (в одном суде 60 — делить нечем)."""
+    COUNTS = {("", ""): 120, ("Обл1", ""): 90, ("Обл2", ""): 30, ("Обл1", "Суд А"): 60, ("Обл1", "Суд Б"): 30}
+
+    def __init__(self):
+        self.searches = []
+
+    def reset(self):
+        pass
+
+    def search(self, args, region="", court="", result=""):
+        self.searches.append((region, court))
+        return self.COUNTS[(region, court)]
+
+    def options(self, label):
+        return ["Обл1", "Обл2"] if label == "Область" else []
+
+    def wait_options(self, label):
+        return ["Суд А", "Суд Б"]
+
+    def log(self, msg):
+        pass
+
+    def debug_snapshot(self, name):
+        pass
+
+
+def test_split_search_skips_done_pieces_after_restart(tmp_path):
+    from sud_parser.collect import DonePieces, split_search
+    args = Namespace(pause=0, category="", case_type="CIVIL", region="", result="")
+    broken = {"Обл1 / Суд Б"}  # в этой части сбой: после перезапуска её надо пройти снова
+    state = {"ok": True}
+
+    def handle(label, found):
+        state["ok"] = label not in broken
+        return found
+
+    portal = _FakeSplitPortal()
+    split_search(portal, args, handle, [], done=DonePieces(tmp_path), complete=lambda: state["ok"])
+    assert (tmp_path / "_done_pieces.txt").read_text(encoding="utf-8").splitlines() == [
+        "Обл1 / Суд А", "Обл2"]
+
+    broken.clear()
+    portal2 = _FakeSplitPortal()
+    split_search(portal2, args, handle, [], done=DonePieces(tmp_path), complete=lambda: state["ok"])
+    # пройденные «Суд А» и «Обл2» не ищем; весь запрос и Обл1 — чтобы добраться до «Суд Б»
+    assert portal2.searches == [("", ""), ("Обл1", ""), ("Обл1", "Суд Б")]
+    assert "весь запрос" in DonePieces(tmp_path)  # теперь пройдено всё
+
+    portal3 = _FakeSplitPortal()
+    split_search(portal3, args, handle, [], done=DonePieces(tmp_path), complete=lambda: state["ok"])
+    assert portal3.searches == []
