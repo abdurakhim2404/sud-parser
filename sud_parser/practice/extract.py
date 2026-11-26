@@ -1107,7 +1107,9 @@ def parse_decision(text: str, file: str = "") -> Decision:
         line = next(l for l in nonempty if m.group(1) in l)
         d.case_number = m.group(1).replace("\\", "/").replace("–", "-")
         d.date = _parse_date(line)
-        city = re.search(r"(?:город|г\.)\s*([А-ЯЁӘІҢҒҮҰҚӨҺ][а-яёәіңғүұқөһ\-]+)", line) \
+        # «Усть-Каменогорск»: после дефиса снова заглавная
+        city = re.search(r"(?:город|г\.)\s*([А-ЯЁӘІҢҒҮҰҚӨҺ][а-яёәіңғүұқөһ]+(?:-[А-ЯЁӘІҢҒҮҰҚӨҺа-яёәіңғүұқөһ][а-яёәіңғүұқөһ]+)?)",
+                         line) \
             or kz.CITY_KZ_RE.search(line)  # «Қызылорда қаласы»
         d.city = city.group(1) if city else ""
     if d.date is None:

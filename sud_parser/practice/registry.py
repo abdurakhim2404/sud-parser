@@ -55,7 +55,10 @@ PARTY_TYPES = [
                               re.I)),
     ("Подрядчик", re.compile(r"подряд|ремонт|монтаж", re.I)),
     ("Поставщик услуг", re.compile(
-        r"энерго|электр|тепло|газ|gaz|energy|\bсу\b|водоканал|сервис|service|телеком|жарык|жылу|лифт|коммунал|сбыт",
+        r"энерго|электр|electr|elektr|тепло|газ|gaz|energy|\bсу\b|водоканал|аква|сервис|service|servis|servise|"
+        r"телеком|telecom|mobile|жарык|жарық|жылу|лифт|коммунал|сбыт|\bРЭК\b|"
+        # вывоз мусора: «Ақ Тәртіп», «Спецмашин», «Тазалык»
+        r"тәртіп|спецмашин|тазалы[кқ]|қоқыс|мусор|вывоз",
         re.I)),
 ]
 
@@ -125,6 +128,19 @@ OBLAST_KZ = {
 }
 
 
+# «города Астаны» -> Астана: в названиях судов город бывает в родительном падеже
+CITY_GENITIVE = {"Астаны": "Астана", "Караганды": "Караганда", "Кызылорды": "Кызылорда", "Семея": "Семей",
+                 "Уральска": "Уральск", "Павлодара": "Павлодар", "Петропавловска": "Петропавловск",
+                 "Костаная": "Костанай", "Тараза": "Тараз", "Талдыкоргана": "Талдыкорган", "Шымкента": "Шымкент",
+                 "Экибастуза": "Экибастуз", "Жезказгана": "Жезказган", "Туркестана": "Туркестан"}
+# основа прилагательного в названии городского суда -> город
+CITY_FROM_ADJ = {"Атырау": "Атырау", "Актау": "Актау", "Актюбин": "Актобе", "Уральс": "Уральск", "Павлодар": "Павлодар",
+                 "Костанай": "Костанай", "Кызылордин": "Кызылорда", "Таразс": "Тараз", "Тараз": "Тараз",
+                 "Петропавлов": "Петропавловск", "Кокшетау": "Кокшетау", "Талдыкорган": "Талдыкорган",
+                 "Карагандин": "Караганда", "Семей": "Семей", "Туркестан": "Туркестан", "Экибастуз": "Экибастуз",
+                 "Темиртау": "Темиртау", "Жезказган": "Жезказган", "Шымкент": "Шымкент"}
+
+
 def place(d: Decision, court: str = "") -> str:
     """Город решения, а для районных судов без города — область из названия суда."""
     city = CITY_FIX.get(d.city, d.city)
@@ -134,6 +150,15 @@ def place(d: Decision, court: str = "") -> str:
     m = re.search(r"([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?(?:ской|цкой))\s+области", court)  # Восточно-Казахстанской
     if m:
         return m.group(1)[:-2] + "ая область"
+    # «Межрайонный суд по гражданским делам города Шымкент», «Суд города Актобе»
+    m = re.search(r"\bгорода\s+([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)", court)
+    if m:
+        city = m.group(1)
+        return CITY_FIX.get(city, CITY_GENITIVE.get(city, city))
+    # «Атырауский городской суд» -> Атырау
+    m = re.search(r"([А-ЯЁ][а-яё]+)(?:ский|цкий)\s+городской\s+суд", court)
+    if m and CITY_FROM_ADJ.get(m.group(1)):
+        return CITY_FROM_ADJ[m.group(1)]
     m = re.search(r"((?:Батыс |Шығыс |Солтүстік )?\w+)\s+облысы", court)
     if m:
         name = OBLAST_KZ.get(m.group(1), m.group(1))
@@ -205,6 +230,7 @@ class Meta:
     portal_category: str = ""
     downloaded: str = ""
     note: str = ""
+    case_number: str = ""  # номер дела с портала (если в тексте решения он не нашёлся)
 
 
 def read_manifest(folder: Path) -> dict[str, Meta]:
@@ -214,8 +240,12 @@ def read_manifest(folder: Path) -> dict[str, Meta]:
     out = {}
     with path.open(encoding="utf-8-sig", newline="") as f:
         for r in csv.DictReader(f):
-            out[r["case_number"]] = Meta(portal_category=r.get("category", ""),
-                                         downloaded=(r.get("time") or "")[:10])
+            meta = Meta(portal_category=r.get("category", ""), downloaded=(r.get("time") or "")[:10],
+                        case_number=r["case_number"])
+            out[r["case_number"]] = meta
+            # и по имени файла: сборщик называет файлы по номеру дела с портала («7142-25-00-2_123_1.docx»),
+            # а в тексте решения номер бывает с опечаткой или не находится
+            out["file:" + re.sub(r"[^0-9A-Za-zА-Яа-яЁё.-]+", "_", r["case_number"]).strip("_")] = meta
     return out
 
 
@@ -286,11 +316,18 @@ def build(sources: list[tuple[Path, str, str]], out: Path, who: str, json_out: P
     records: list[dict] = []
     links = acts.read_links(out / "links.csv")
     many = len(folders) > 1
+    seen: set[str] = set()
     for d in result.decisions:
         folder_name, _, file_name = d.file.rpartition("/") if many else ("", "", d.file)
         folder = next(f for f in folders if not many or f.name == folder_name)
         src = folder / file_name
-        meta = metas.get(d.case_number) or metas[f"__default__{folder}"]
+        meta = (metas.get(d.case_number) or metas.get("file:" + re.sub(r"_\d+$", "", Path(file_name).stem))
+                or metas[f"__default__{folder}"])
+        if not d.case_number and meta.case_number:
+            d.case_number = meta.case_number
+        if d.case_number in seen:  # второй файл того же дела (номер стал известен только из журнала сборщика)
+            continue
+        seen.add(d.case_number)
         if not meta.downloaded:
             meta = Meta(meta.portal_category, datetime.fromtimestamp(src.stat().st_mtime).date().isoformat(),
                         meta.note)

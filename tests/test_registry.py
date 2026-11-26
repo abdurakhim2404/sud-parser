@@ -44,3 +44,21 @@ def test_place_from_court_when_no_city():
     d = Decision(file="", court="Глубоковский районный суд Восточно-Казахстанской области")
     assert place(d) == "Восточно-Казахстанская область"
     assert place(Decision(file="", city="Өскемен")) == "Усть-Каменогорск"
+
+
+def test_party_types_from_collected_debt_cases():
+    from sud_parser.practice.extract import OSI, classify_topic, party_kind
+    assert party_type("ТОО «Қарағанды Жарық»", False) == "Поставщик услуг"
+    assert party_type("ТОО «Adal Electro»", False) == "Поставщик услуг"
+    assert party_type("ТОО «Ақ Тәртіп»", False) == "Поставщик услуг"
+    assert party_type("АО «Jusan Mobile»", False) == "Поставщик услуг"
+    assert party_kind("«Береке» мүлік иелерінің бірлестігі") == OSI
+    assert classify_topic("қарызды өндіру туралы") == "Взыскание задолженности по взносам и расходам на содержание"
+
+
+def test_place_from_city_court():
+    from sud_parser.practice.extract import Decision
+    assert place(Decision(file="", court="Атырауский городской суд")) == "Атырау"
+    assert place(Decision(file="", court="Межрайонный суд по гражданским делам города Шымкент")) == "Шымкент"
+    assert place(Decision(file="", court="Суд города Актобе")) == "Актобе"
+    assert place(Decision(file="", court="Специализированный межрайонный экономический суд города Астаны")) == "Астана"
