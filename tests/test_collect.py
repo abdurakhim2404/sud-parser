@@ -150,3 +150,34 @@ def test_split_search_skips_done_pieces_after_restart(tmp_path):
     portal3 = _FakeSplitPortal()
     split_search(portal3, args, handle, [], done=DonePieces(tmp_path), complete=lambda: state["ok"])
     assert portal3.searches == []
+
+
+PORTAL_CATEGORIES = [
+    "О взыскании платы за жилье и коммунальные услуги",
+    "О взыскании расходов на содержание общего имущества объекта кондоминиума",
+    "Об обжаловании действий (бездействий) КСК (КСК ПК)",
+    "Споры о возмещении ущерба",
+]
+
+
+def test_match_category_exact_and_part():
+    from sud_parser.collect import match_category
+    assert match_category("Споры о возмещении ущерба", "x", PORTAL_CATEGORIES)[0] == "Споры о возмещении ущерба"
+    assert match_category("Об обжаловании действий (бездействий) КСК", "x", PORTAL_CATEGORIES)[0] == \
+        "Об обжаловании действий (бездействий) КСК (КСК ПК)"
+
+
+def test_match_category_by_words_when_wording_differs():
+    from sud_parser.collect import match_category
+    found, _ = match_category(
+        "расходов на управление объектом кондоминиума",
+        "Жилищные: взыскание расходов на управление объектом кондоминиума и содержание общего имущества",
+        PORTAL_CATEGORIES)
+    assert found == "О взыскании расходов на содержание общего имущества объекта кондоминиума"
+
+
+def test_match_category_missing_gives_hints_not_guess():
+    from sud_parser.collect import match_category
+    found, near = match_category("По договору подряда", "Договорные: по договору подряда", PORTAL_CATEGORIES)
+    assert found is None
+

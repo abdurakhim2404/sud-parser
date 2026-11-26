@@ -139,6 +139,8 @@ class Portal:
         self.log = log
         self.page_wait = page_wait  # сколько ждать смены страницы после «вперёд»
         self.category_text = ""     # полное название выбранной категории, как на портале
+        self.category_alias: dict[str, str] = {}
+        self.portal_categories: list[str] = []
 
     def button(self, text: str):
         return self.page.get_by_role("button", name=text, exact=True)
@@ -256,26 +258,32 @@ class Portal:
         self.wait_login(timeout_min)
         self.open_bank()
 
-    def select_category(self, category: str) -> None:
+    def select_category(self, category: str, name: str = "") -> None:
         """«Категория дела» — всплывающее окно с поиском среди ~300 категорий, а не обычный список.
-        Берём вариант, совпадающий целиком, иначе первый, где встречается текст."""
+        Берём вариант, совпадающий целиком, иначе первый, где встречается текст. Если такого нет
+        (в таблице категория сформулирована иначе, чем на портале), выписываем все категории портала
+        и берём ту, где совпадает больше всего слов (match_category); выбор пишем в журнал."""
+        if category in self.category_alias:
+            category = self.category_alias[category]
         self.page.locator("form label", has_text="Категория дела").locator("xpath=..").locator("button").first.click()
         search = self.page.locator("[data-radix-popper-content-wrapper] input[placeholder='Поиск']")
         search.wait_for(timeout=10_000)
-        search.fill(category)
         options = self.page.locator("[data-radix-popper-content-wrapper] [cmdk-item]")
-        want = " ".join(category.split()).lower()
-        index, texts = None, []
-        deadline = time.time() + 20  # список категорий портал подгружает не сразу
-        while index is None and time.time() < deadline:
-            time.sleep(1)
-            texts = [t.strip() for t in options.all_inner_texts()]
-            index = next((i for i, t in enumerate(texts) if " ".join(t.split()).lower() == want), None)
-            if index is None:
-                index = next((i for i, t in enumerate(texts) if want in t.lower()), None)
+        index, texts = self._find_option(search, options, category, 20)
         if index is None:
-            self.debug_snapshot("no-category")
-            raise ValueError(f"нет категории «{category}» на портале (вариантов в списке: {len(texts)})")
+            portal_list = self.probe_categories(search, options)
+            found, near = match_category(category, name or category, portal_list)
+            if found is None:
+                self.page.keyboard.press("Escape")
+                raise CategoryMissing(f"нет категории «{category}» на портале. Похожие: "
+                                      + ("; ".join(f"«{t}»" for t in near) or "нет"))
+            self.log(f"Категория «{category}» на портале называется «{found}» — беру её")
+            self.category_alias[category] = found
+            index, texts = self._find_option(search, options, found, 20)
+            if index is None:
+                self.debug_snapshot("no-category")
+                self.page.keyboard.press("Escape")
+                raise ValueError(f"не выбралась категория «{found}»")
         options.nth(index).click()
         time.sleep(0.8)
         if self.page.locator("[data-radix-popper-content-wrapper]").count():
@@ -284,17 +292,55 @@ class Portal:
             self.log(f"Категория: {texts[index]}")
         self.category_text = texts[index]  # так же она записана в колонке «Категория» выдачи
 
-    def all_categories(self) -> list[str]:
-        """Все категории из всплывающего окна (для сверки с categories.py)."""
+    @staticmethod
+    def _find_option(search, options, text: str, wait: float):
+        search.fill(text)
+        want = " ".join(text.split()).lower()
+        index, texts = None, []
+        deadline = time.time() + wait  # список категорий портал подгружает не сразу
+        while index is None and time.time() < deadline:
+            time.sleep(1)
+            texts = [t.strip() for t in options.all_inner_texts()]
+            index = next((i for i, t in enumerate(texts) if " ".join(t.split()).lower() == want), None)
+            if index is None:
+                index = next((i for i, t in enumerate(texts) if want in " ".join(t.split()).lower()), None)
+        return index, texts
+
+    def probe_categories(self, search, options) -> list[str]:
+        """Выписать все категории открытого окна: портал показывает варианты только по введённому тексту,
+        поэтому ищем по частым слогам и объединяем. Список сохраняется в data/collected/portal_categories.txt."""
+        if self.portal_categories:
+            return self.portal_categories
+        seen: dict[str, None] = {}
+        for query in CATEGORY_PROBES:
+            search.fill(query)
+            texts: list[str] = []
+            for _ in range(6):
+                time.sleep(1)
+                texts = [" ".join(t.split()) for t in options.all_inner_texts()]
+                if texts:
+                    break
+            for t in texts:
+                if t and t != "Выберите":
+                    seen.setdefault(t, None)
+        self.portal_categories = list(seen)
+        path = Path("data/collected/portal_categories.txt")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if seen:
+            path.write_text("\n".join(seen), encoding="utf-8")
+        self.log(f"Выписал категории портала: {len(seen)} -> {path}")
+        return self.portal_categories
+
+    def all_categories(self, case_type: str = "CIVIL") -> list[str]:
+        """Все категории портала для типа производства (для сверки с categories.py)."""
+        args = argparse.Namespace(case_type=case_type, year=time.localtime().tm_year, keywords="",
+                                  region="", result="", category="")
+        self.search(args)
         self.advanced_open()
         self.page.locator("form label", has_text="Категория дела").locator("xpath=..").locator("button").first.click()
-        options = self.page.locator("[data-radix-popper-content-wrapper] [cmdk-item]")
-        texts: list[str] = []
-        for _ in range(20):  # список подгружается не сразу
-            time.sleep(1)
-            texts = [" ".join(t.split()) for t in options.all_inner_texts()]
-            if len(texts) > 50:
-                break
+        search = self.page.locator("[data-radix-popper-content-wrapper] input[placeholder='Поиск']")
+        search.wait_for(timeout=10_000)
+        texts = self.probe_categories(search, self.page.locator("[data-radix-popper-content-wrapper] [cmdk-item]"))
         self.page.keyboard.press("Escape")
         return texts
 
@@ -318,7 +364,7 @@ class Portal:
         if region or result or category or court:
             self.advanced_open()
             if category:
-                self.select_category(category)
+                self.select_category(category, getattr(args, "category_name", ""))
             if region:
                 self.set_select("Область", region)
             if court:
@@ -439,6 +485,44 @@ def say(message: str) -> None:
     print(message, flush=True)  # сразу, а не в конце: прогон идёт долго
 
 
+class CategoryMissing(ValueError):
+    """Категории нет на портале — повторять поиск бесполезно."""
+
+
+CATEGORY_PROBES = ["ени", "ани", "ост", "ова", "ств", "при", "спо", "взы", "дог", "обж", "кон", "иму", "пра", "тру", "лиц", "нов", "раз", "пер", "тел", "ого"]  # поиск по 1 букве не работает
+_STEM_RE = re.compile(r"[а-яёәіңғүұқөһa-z]{4,}")
+_STOP_STEMS = {"жили", "дого", "спор", "вопр", "граж", "друг", "свое", "связ", "возн", "отно", "лица"}
+
+
+def _stems(text: str) -> set[str]:
+    """Основы слов (первые 5 букв) — чтобы «расходов» и «расходы», «кондоминиума» и «кондоминиумом» совпадали."""
+    return {w[:5] for w in _STEM_RE.findall(text.lower().replace("ё", "е")) if w[:4] not in _STOP_STEMS}
+
+
+def match_category(wanted: str, name: str, portal: list[str]) -> tuple[str | None, list[str]]:
+    """Найти категорию из таблицы среди категорий портала.
+
+    Сначала — как раньше: текст для поиска (wanted) целиком или как часть названия. Если такого нет
+    (названия в таблице и на портале сформулированы по-разному), берём категорию портала, где
+    совпадает больше всего основ слов из названия в таблице, — только если совпадает хотя бы 60%
+    и такая категория одна. Возвращает (название на портале или None, ближайшие варианты для журнала)."""
+    key = " ".join(wanted.split()).lower()
+    for t in portal:
+        if " ".join(t.split()).lower() == key:
+            return t, []
+    for t in portal:
+        if key in t.lower():
+            return t, []
+    want = _stems(name.split(":", 1)[-1]) | _stems(wanted)
+    if not want:
+        return None, []
+    scored = sorted(((len(want & _stems(t)) / len(want), t) for t in portal), key=lambda x: -x[0])
+    near = [t for score, t in scored[:3] if score > 0]
+    if scored and scored[0][0] >= 0.6 and (len(scored) == 1 or scored[1][0] < scored[0][0]):
+        return scored[0][1], near
+    return None, near
+
+
 def jobs(args) -> list[tuple[argparse.Namespace, str]]:
     """Что собирать: одна выборка или категории реестра × годы — каждая в свою папку."""
     if not getattr(args, "categories", ""):
@@ -453,6 +537,7 @@ def jobs(args) -> list[tuple[argparse.Namespace, str]]:
         for year in args.years:
             job = argparse.Namespace(**vars(args))
             job.category, job.case_type, job.year = cat.portal, cat.case_type, year
+            job.category_name = cat.name
             job.out = str(Path(args.out) / f"{cid}_{year}")
             out.append((job, f"[{cid} · {year}] {cat.name}"))
     return out
@@ -473,10 +558,7 @@ def collect(args, log=say) -> int:
             portal.open_bank()
             if getattr(args, "show_categories", False):
                 texts = portal.all_categories()
-                path = Path("data/collected/portal_categories.txt")
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("\n".join(texts), encoding="utf-8")
-                log(f"Категорий на портале: {len(texts)} -> {path}")
+                log(f"Категорий на портале: {len(texts)}")
                 if not getattr(args, "categories", ""):
                     todo = []
             for n, (job, title) in enumerate(todo, 1):
@@ -611,6 +693,9 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
                 portal.reset()
                 found = portal.search(args, region=region, court=court, result=result)
                 time.sleep(args.pause)  # портал отвечает 429 на частые поиски
+                break
+            except CategoryMissing as exc:
+                portal.log(f"!! {exc}")
                 break
             except Exception as exc:  # в т.ч. таймауты Playwright: у них свой класс ошибки
                 if "401" in str(exc) or not portal.logged_in():
