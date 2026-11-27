@@ -721,7 +721,7 @@ def split_search(portal: Portal, args, handle, pieces: list[dict], on_change=lam
             return not found or complete()
         # Больше 50: делим на следующем уровне.
         if not region:
-            sub = [(r, "", result) for r in portal.options("Область")]
+            sub = [(r, "", result) for r in portal.options("Область") if court_fits(r, args.case_type)]
         elif not court and portal.wait_options("Судебный орган"):
             sub = [(region, c, result) for c in portal.wait_options("Судебный орган") if court_fits(c, args.case_type)]
         elif not result:

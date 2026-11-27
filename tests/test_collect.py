@@ -181,3 +181,11 @@ def test_match_category_missing_gives_hints_not_guess():
     found, near = match_category("По договору подряда", "Договорные: по договору подряда", PORTAL_CATEGORIES)
     assert found is None
 
+
+
+def test_court_fits_skips_non_region_entries():
+    from sud_parser.collect import court_fits
+    assert not court_fits("Кассационный суд Республики Казахстан", "CIVIL")
+    assert not court_fits("Упразднённые суды (c 2022 года)", "CIVIL")
+    assert court_fits("Область Жетісу", "CIVIL")
+    assert court_fits("город Алматы", "CIVIL")
